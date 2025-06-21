@@ -12,7 +12,7 @@ API_KEY = st.secrets["API_KEY"]
 st.markdown("""
     <style>
     html, body, [class*="css"]  {
-        font-size: 8px;
+        font-size: 12px;
     }
     </style>
 """, unsafe_allow_html=True)
