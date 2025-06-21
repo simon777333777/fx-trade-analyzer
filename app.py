@@ -9,10 +9,10 @@ from datetime import datetime, timedelta
 API_KEY = st.secrets["API_KEY"]
 
 # --- ユーザーインターフェース ---
-st.title("FXトレード分析ツール")
+st.title("FXトレード分析")
 
-symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"])
-style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"])
+symbol = st.selectbox("通貨ペアを選択", ["GBP/JPY", "EUR/USD", "USD/JPY", "AUD/USD"])
+style = st.selectbox("トレードスタイルを選択", ["スイング", "デイトレード", "スキャルピング"])
 
 if st.button("実行"):
 
