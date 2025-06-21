@@ -8,6 +8,15 @@ from datetime import datetime, timedelta
 # --- APIキーの指定 ---
 API_KEY = st.secrets["API_KEY"]
 
+# CSSで文字サイズ調整
+st.markdown("""
+    <style>
+    html, body, [class*="css"]  {
+        font-size: 14px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- ユーザーインターフェース ---
 st.title("FXトレード分析")
 
