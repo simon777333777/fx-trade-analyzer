@@ -5,20 +5,14 @@ import numpy as np
 import requests
 from datetime import datetime, timedelta
 
-# --- APIキーの指定（streamlit secretsから取得）---
+# --- APIキーの指定 ---
 API_KEY = st.secrets["API_KEY"]
 
-# --- 通貨ペア選択 ---
-st.title("FXトレード分析（実データバックテスト対応）")
+# --- ユーザーインターフェース ---
+st.title("FXトレード分析（実データ・通貨対応バックテスト版）")
 
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
-style = st.selectbox("トレードスタイルを選択", ["スイング", "デイトレード", "スキャルピング"], index=1)
-
-# --- pips係数の自動判定関数 ---
-def get_pips_factor(symbol):
-    return 0.01 if "JPY" in symbol else 0.0001
-
-pips_factor = get_pips_factor(symbol)
+style = st.selectbox("トレードスタイルを選択", ["スイング", "デイトレード", "スキャルピング"], index=0)
 
 if st.button("実行"):
 
@@ -33,7 +27,7 @@ if st.button("実行"):
     timeframes = tf_map[style]
 
     def fetch_data(symbol, interval):
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
         r = requests.get(url)
         data = r.json()
         if "values" not in data:
@@ -79,7 +73,7 @@ if st.button("実行"):
         else:
             guide.append("❌ BB反発無し")
 
-        if last["RCI"] and last["RCI"] > 0.5:
+        if last["RCI"] > 0.5:
             score += 1
             guide.append("✅ RCI上昇傾向")
         else:
@@ -87,6 +81,9 @@ if st.button("実行"):
 
         signal = "買い" if score >= 3 else "待ち"
         return signal, guide, score / 4
+
+    def get_pips_multiplier(symbol):
+        return 100 if "JPY" in symbol else 10000
 
     def suggest_trade_plan(df, direction):
         price = df["close"].iloc[-1]
@@ -100,13 +97,13 @@ if st.button("実行"):
         else:
             return price, None, None, 0, (0, 0)
         rr = abs((tp - price) / (sl - price))
-        pips_tp = int(abs(tp - price) / pips_factor)
-        pips_sl = int(abs(sl - price) / pips_factor)
-        return price, tp, sl, rr, (pips_tp, pips_sl)
+        pips = get_pips_multiplier(symbol)
+        return price, tp, sl, rr, (round(abs(tp - price) * pips), round(abs(sl - price) * pips))
 
-    def backtest(df, direction):
+    def real_backtest(df, direction):
         results = []
-        for i in range(len(df)-15):
+        pips = get_pips_multiplier(symbol)
+        for i in range(len(df) - 30, len(df) - 15):
             price = df["close"].iloc[i]
             atr = df["close"].rolling(window=14).std().iloc[i]
             if atr == 0 or np.isnan(atr):
@@ -132,15 +129,12 @@ if st.button("実行"):
     st.subheader(f"通貨ペア：{symbol} | スタイル：{style}")
 
     final_scores = []
-    final_signals = []
-
     for tf in timeframes:
         df = fetch_data(symbol, tf)
         if df is None:
             continue
         df = calc_indicators(df)
         sig, guide, score = extract_signal(df)
-        final_signals.append((tf, sig, score, guide))
         st.markdown(f"### ⏱ {tf} 判定：{sig}")
         for g in guide:
             st.write("-", g)
@@ -152,7 +146,7 @@ if st.button("実行"):
     df_all = fetch_data(symbol, timeframes[1])
     df_all = calc_indicators(df_all)
     entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(df_all, decision)
-    bt_results = backtest(df_all, decision)
+    bt_results = real_backtest(df_all, decision)
     wins = sum(1 for r in bt_results if r[-1] == "利確")
     total = len(bt_results)
     win_rate = wins / total if total > 0 else 0
@@ -166,7 +160,7 @@ if st.button("実行"):
         st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
 
     if decision != "待ち":
-        st.subheader("🎯 トレードプラン（想定）")
+        st.subheader("\n🎯 トレードプラン（想定）")
         st.write(f"エントリーレート：{entry:.4f}")
         st.write(f"指値（利確）：{tp:.4f}（+{pips_tp} pips）")
         st.write(f"逆指値（損切）：{sl:.4f}（-{pips_sl} pips）")
@@ -175,7 +169,7 @@ if st.button("実行"):
     else:
         st.subheader("現在はエントリー待ちです。")
 
-    with st.expander("バックテスト結果（詳細）"):
+    with st.expander("バックテスト結果（直近15件）"):
         df_bt = pd.DataFrame(bt_results, columns=["日時", "エントリー", "損切", "利確", "結果"])
         st.dataframe(df_bt)
-        st.write(f"勝率：{win_rate*100:.1f}% | 件数：{total}")
+        st.write(f"勝率：{win_rate*100:.1f}%  | 件数：{total}")
