@@ -5,26 +5,24 @@ import numpy as np
 import requests
 from datetime import datetime, timedelta
 
-# --- APIキーの指定 ---
-API_KEY = st.secrets["API_KEY"]  # secrets.tomlから取得
+# --- APIキー ---
+API_KEY = st.secrets["API_KEY"]
 
-# --- ユーザーインターフェース ---
-st.title("FXトレード分析")
+# --- UI ---
+st.title("FXトレード分析（改良版）")
 
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
 style = st.selectbox("トレードスタイルを選択", ["スイング", "デイトレード", "スキャルピング"], index=0)
 
-# 通貨ペアによってpips計算単位を設定
-def get_pips_unit(symbol):
-    # 円絡みは0.01、ドル絡みは0.0001に設定（単純化）
-    if "JPY" in symbol:
-        return 0.01
-    else:
-        return 0.0001
+# バックテスト期間を選択できるように
+backtest_period = st.slider("バックテスト期間（本数）", min_value=15, max_value=50, value=15, step=5)
+
+# TP/SL倍率（ATRに対する倍率）を設定可能に
+sl_multiplier = st.slider("損切り幅倍率（ATR比）", min_value=0.3, max_value=2.0, value=1.0, step=0.1)
+tp_multiplier = st.slider("利確幅倍率（ATR比）", min_value=0.5, max_value=3.0, value=1.6, step=0.1)
 
 if st.button("実行"):
 
-    # --- トレードスタイルに応じた時間足定義 ---
     tf_map = {
         "スキャルピング": ["5min", "15min", "1h"],
         "デイトレード": ["15min", "1h", "4h"],
@@ -34,10 +32,9 @@ if st.button("実行"):
         "5min": 0.2, "15min": 0.3, "1h": 0.2, "4h": 0.3, "1day": 0.5
     }
     timeframes = tf_map[style]
-    pips_unit = get_pips_unit(symbol)
 
     def fetch_data(symbol, interval):
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=200&apikey={API_KEY}"
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=300&apikey={API_KEY}"
         r = requests.get(url)
         data = r.json()
         if "values" not in data:
@@ -47,8 +44,9 @@ if st.button("実行"):
         df["datetime"] = pd.to_datetime(df["datetime"])
         df.set_index("datetime", inplace=True)
         df = df.sort_index()
-        for col in ["open", "high", "low", "close"]:
-            df[col] = df[col].astype(float)
+        df["close"] = df["close"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
         return df
 
     def calc_indicators(df):
@@ -59,14 +57,7 @@ if st.button("実行"):
         df["Signal"] = df["MACD"].ewm(span=9).mean()
         df["Upper"] = df["close"].rolling(window=20).mean() + 2 * df["close"].rolling(window=20).std()
         df["Lower"] = df["close"].rolling(window=20).mean() - 2 * df["close"].rolling(window=20).std()
-        df["RCI"] = df["close"].rank().rolling(window=9).apply(lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1])
-
-        # ATR計算 (14期間の単純移動平均版)
-        high_low = df["high"] - df["low"]
-        high_close_prev = np.abs(df["high"] - df["close"].shift(1))
-        low_close_prev = np.abs(df["low"] - df["close"].shift(1))
-        tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-        df["ATR"] = tr.rolling(window=14).mean()
+        df["RCI"] = df["close"].rank().rolling(window=9).apply(lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1], raw=True)
         return df
 
     def extract_signal(df):
@@ -100,55 +91,53 @@ if st.button("実行"):
         signal = "買い" if score >= 3 else "待ち"
         return signal, guide, score / 4  # 正規化スコア
 
-    def suggest_trade_plan(df, direction, pips_unit):
+    def suggest_trade_plan(df, direction):
         price = df["close"].iloc[-1]
-        atr = df["ATR"].iloc[-1]  # ATRを使用
-        if np.isnan(atr) or atr == 0:
-            return price, None, None, 0, (0, 0)
+        atr = df["high"].rolling(window=14).max() - df["low"].rolling(window=14).min()  # 14期間の高低差で代用
+        atr_val = atr.iloc[-1]
+        if np.isnan(atr_val) or atr_val == 0:
+            atr_val = 0.001  # 非常に小さい値で回避
         if direction == "買い":
-            sl = price - atr * 1.0
-            tp = price + atr * 1.6
+            sl = price - atr_val * sl_multiplier
+            tp = price + atr_val * tp_multiplier
         elif direction == "売り":
-            sl = price + atr * 1.0
-            tp = price - atr * 1.6
+            sl = price + atr_val * sl_multiplier
+            tp = price - atr_val * tp_multiplier
         else:
-            return price, None, None, 0, (0, 0)
-        rr = abs((tp - price) / (sl - price))
-        pips_tp = abs(tp - price) / pips_unit
-        pips_sl = abs(sl - price) / pips_unit
-        return price, tp, sl, rr, (pips_tp, pips_sl)
+            return price, None, None, 0, 0, 0
+        rr = abs((tp - price) / (sl - price)) if sl != price else 0
+        # pips計算（円通貨は100倍、小数通貨は10000倍）
+        pips_tp = abs(tp - price) * (100 if any(c in symbol for c in ["JPY"]) else 10000)
+        pips_sl = abs(sl - price) * (100 if any(c in symbol for c in ["JPY"]) else 10000)
+        return price, tp, sl, rr, pips_tp, pips_sl
 
-    def backtest(df, direction, pips_unit):
+    def backtest(df, direction):
         results = []
-        start_idx = df["ATR"].first_valid_index()
-        if start_idx is None:
-            st.warning("ATRの有効なデータがありません。バックテストできません。")
-            return results
-        start_pos = df.index.get_loc(start_idx)
-        for i in range(start_pos, len(df) - 15):
-            price = df["close"].iloc[i]
-            atr = df["ATR"].iloc[i]
+        n = backtest_period
+        for i in range(len(df) - n):
+            atr = df["high"].iloc[i:i+14].max() - df["low"].iloc[i:i+14].min()
             if np.isnan(atr) or atr == 0:
                 st.write(f"スキップ：インデックス {i}, ATR={atr}")
                 continue
+            price = df["close"].iloc[i]
             if direction == "買い":
-                sl = price - atr * 1.0
-                tp = price + atr * 1.6
-                future = df["low"].iloc[i+1:i+15]
-                if any(f <= sl for f in future):
+                sl = price - atr * sl_multiplier
+                tp = price + atr * tp_multiplier
+                future_highs = df["high"].iloc[i+1:i+1+n]
+                future_lows = df["low"].iloc[i+1:i+1+n]
+                if any(future_lows <= sl):
                     results.append((df.index[i], price, sl, tp, "損切"))
-                elif any(f >= tp for f in future):
+                elif any(future_highs >= tp):
                     results.append((df.index[i], price, sl, tp, "利確"))
             elif direction == "売り":
-                sl = price + atr * 1.0
-                tp = price - atr * 1.6
-                future = df["high"].iloc[i+1:i+15]
-                if any(f >= sl for f in future):
+                sl = price + atr * sl_multiplier
+                tp = price - atr * tp_multiplier
+                future_highs = df["high"].iloc[i+1:i+1+n]
+                future_lows = df["low"].iloc[i+1:i+1+n]
+                if any(future_highs >= sl):
                     results.append((df.index[i], price, sl, tp, "損切"))
-                elif any(f <= tp for f in future):
+                elif any(future_lows <= tp):
                     results.append((df.index[i], price, sl, tp, "利確"))
-        if len(results) == 0:
-            st.warning("⚠ バックテスト結果が0件です。ATRが0か、TP/SLがヒットしない可能性があります。")
         return results
 
     st.subheader(f"通貨ペア：{symbol} | スタイル：{style}")
@@ -174,37 +163,39 @@ if st.button("実行"):
 
     df_all = fetch_data(symbol, timeframes[1])
     if df_all is None:
-        st.error("メインの時間足データが取得できませんでした。")
+        st.error("中期時間足のデータ取得に失敗しました。")
+        st.stop()
+
+    df_all = calc_indicators(df_all)
+    entry, tp, sl, rr, pips_tp, pips_sl = suggest_trade_plan(df_all, decision)
+
+    bt_results = backtest(df_all, decision)
+    total_bt = len(bt_results)
+    wins = sum(1 for r in bt_results if r[-1] == "利確")
+    win_rate = wins / total_bt if total_bt > 0 else 0
+
+    st.subheader("\n🧭 エントリーガイド（総合評価）")
+    if decision == "買い":
+        st.write(f"✅ {style} において複数の時間足が買いシグナルを示しています")
+        st.write("⏳ 中期・長期の上昇トレンドが短期にも波及")
+        st.write("📌 押し目が完了しており、エントリータイミングとして有効")
     else:
-        df_all = calc_indicators(df_all)
-        entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(df_all, decision, pips_unit)
-        bt_results = backtest(df_all, decision, pips_unit)
-        wins = sum(1 for r in bt_results if r[-1] == "利確")
-        total = len(bt_results)
-        win_rate = wins / total if total > 0 else 0
+        st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
 
-        st.subheader("\n🧭 エントリーガイド（総合評価）")
-        if decision == "買い":
-            st.write(f"✅ {style} において複数の時間足が買いシグナルを示しています")
-            st.write("⏳ 中期・長期の上昇トレンドが短期にも波及")
-            st.write("📌 押し目が完了しており、エントリータイミングとして有効")
+    if decision != "待ち":
+        st.subheader("\n🎯 トレードプラン（想定）")
+        st.write(f"エントリーレート：{entry:.5f}")
+        st.write(f"指値（利確）：{tp:.5f}（+{pips_tp:.1f} pips）")
+        st.write(f"逆指値（損切）：{sl:.5f}（-{pips_sl:.1f} pips）")
+        st.write(f"リスクリワード比：{rr:.2f}")
+        st.write(f"想定勝率：{win_rate*100:.1f}%")
+    else:
+        st.subheader("現在はエントリー待ちです。")
+
+    with st.expander(f"バックテスト結果（最大{backtest_period}件）"):
+        if total_bt == 0:
+            st.warning("⚠ バックテスト結果が0件です。ATRが0か、TP/SLがヒットしない可能性があります。")
         else:
-            st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
-
-        if decision != "待ち":
-            st.subheader("\n🎯 トレードプラン（想定）")
-            st.write(f"エントリーレート：{entry:.5f}")
-            st.write(f"指値（利確）：{tp:.5f}（+{pips_tp:.1f} pips）")
-            st.write(f"逆指値（損切）：{sl:.5f}（-{pips_sl:.1f} pips）")
-            st.write(f"リスクリワード比：{rr:.2f}")
-            st.write(f"想定勝率：{win_rate*100:.1f}%")
-        else:
-            st.subheader("現在はエントリー待ちです。")
-
-        with st.expander("バックテスト結果（最大100件）"):
-            if total > 0:
-                df_bt = pd.DataFrame(bt_results, columns=["日時", "エントリー", "損切", "利確", "結果"])
-                st.dataframe(df_bt)
-                st.write(f"勝率：{win_rate*100:.1f}%  | 件数：{total}")
-            else:
-                st.write("バックテストの該当データがありません。")
+            df_bt = pd.DataFrame(bt_results, columns=["日時", "エントリー", "損切", "利確", "結果"])
+            st.dataframe(df_bt)
+            st.write(f"勝率：{win_rate*100:.1f}%")
