@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timedelta
 
 # --- APIキーの指定 ---
-API_KEY = st.secrets["API_KEY"]  # secrets.tomlから取得
+API_KEY = st.secrets["API_KEY"]
 
 # --- ユーザーインターフェース ---
 st.title("FXトレード分析")
@@ -81,7 +81,7 @@ if st.button("実行"):
             guide.append("❌ RCI未達")
 
         signal = "買い" if score >= 3 else "待ち"
-        return signal, guide, score / 4  # 正規化スコア
+        return signal, guide, score / 4
 
     def suggest_trade_plan(df, direction):
         price = df["close"].iloc[-1]
@@ -93,22 +93,30 @@ if st.button("実行"):
             sl = price + atr * 1.0
             tp = price - atr * 1.6
         else:
-            return price, None, None, 0
+            return price, None, None, 0, 0
         rr = abs((tp - price) / (sl - price))
-        return price, tp, sl, rr
 
-    def dummy_backtest():
+        # --- pips計算単位（JPYペアは1.0、小数ペアは0.0001） ---
+        pip_unit = 0.01 if "/JPY" in symbol else 0.0001
+        pips_tp = int((tp - price) / pip_unit)
+        pips_sl = int((price - sl) / pip_unit)
+
+        return price, tp, sl, rr, (pips_tp, pips_sl)
+
+    def dummy_backtest(symbol):
         np.random.seed(0)
         log = []
         win_count = 0
+        base_price = 190 if "/JPY" in symbol else 1.0
+        pip_unit = 0.01 if "/JPY" in symbol else 0.0001
         for i in range(100):
-            entry = 190 + np.random.randn() * 0.5
-            sl = entry - 0.5
-            tp = entry + 0.8
+            entry = base_price + np.random.randn() * pip_unit * 10
+            sl = entry - pip_unit * 50
+            tp = entry + pip_unit * 80
             outcome = np.random.choice(["勝ち", "負け"], p=[0.6, 0.4])
-            pips = int((tp - entry) * 100) if outcome == "勝ち" else int((sl - entry) * 100)
+            pips = int((tp - entry) / pip_unit) if outcome == "勝ち" else int((sl - entry) / pip_unit)
             win_count += 1 if outcome == "勝ち" else 0
-            log.append({"No": i+1, "日時": (datetime.now() - timedelta(hours=i)).strftime("%Y-%m-%d %H:%M"), "エントリー": round(entry, 2), "結果": outcome, "損益(pips)": pips})
+            log.append({"No": i+1, "日時": (datetime.now() - timedelta(hours=i)).strftime("%Y-%m-%d %H:%M"), "エントリー": round(entry, 5), "結果": outcome, "損益(pips)": pips})
         return win_count / 100, pd.DataFrame(log)
 
     st.subheader(f"通貨ペア：{symbol} | スタイル：{style}")
@@ -134,8 +142,8 @@ if st.button("実行"):
 
     df_all = fetch_data(symbol, timeframes[1])
     df_all = calc_indicators(df_all)
-    entry, tp, sl, rr = suggest_trade_plan(df_all, decision)
-    win_rate, bt_log = dummy_backtest()
+    entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(df_all, decision)
+    win_rate, bt_log = dummy_backtest(symbol)
 
     st.subheader("\n🧭 エントリーガイド（総合評価）")
     if decision == "買い":
@@ -147,9 +155,9 @@ if st.button("実行"):
 
     if decision != "待ち":
         st.subheader("\n🎯 トレードプラン（想定）")
-        st.write(f"エントリーレート：{entry:.2f}")
-        st.write(f"指値（利確）：{tp:.2f}（+{abs(tp-entry)*100:.0f} pips）")
-        st.write(f"逆指値（損切）：{sl:.2f}（-{abs(sl-entry)*100:.0f} pips）")
+        st.write(f"エントリーレート：{entry:.5f}")
+        st.write(f"指値（利確）：{tp:.5f}（+{pips_tp} pips）")
+        st.write(f"逆指値（損切）：{sl:.5f}（-{pips_sl} pips）")
         st.write(f"リスクリワード比：{rr:.2f}")
         st.write(f"想定勝率：{win_rate*100:.1f}%")
     else:
