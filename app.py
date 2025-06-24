@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 API_KEY = st.secrets["API_KEY"]
 
 # --- ユーザーインターフェース ---
-st.title("FXトレード分析（実データ・通貨対応バックテスト版）")
+st.title("FXトレード分析（デバッグ付き）")
 
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
 style = st.selectbox("トレードスタイルを選択", ["スイング", "デイトレード", "スキャルピング"], index=0)
@@ -27,7 +27,7 @@ if st.button("実行"):
     timeframes = tf_map[style]
 
     def fetch_data(symbol, interval):
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
         r = requests.get(url)
         data = r.json()
         if "values" not in data:
@@ -60,30 +60,23 @@ if st.button("実行"):
             guide.append("✅ MACDゴールデンクロス")
         else:
             guide.append("❌ MACD未達")
-
         if last["SMA_5"] > last["SMA_20"]:
             score += 1
             guide.append("✅ SMA短期 > 長期")
         else:
             guide.append("❌ SMA条件未達")
-
         if last["close"] < last["Lower"]:
             score += 1
             guide.append("✅ BB下限反発の可能性")
         else:
             guide.append("❌ BB反発無し")
-
         if last["RCI"] > 0.5:
             score += 1
             guide.append("✅ RCI上昇傾向")
         else:
             guide.append("❌ RCI未達")
-
         signal = "買い" if score >= 3 else "待ち"
         return signal, guide, score / 4
-
-    def get_pips_multiplier(symbol):
-        return 100 if "JPY" in symbol else 10000
 
     def suggest_trade_plan(df, direction):
         price = df["close"].iloc[-1]
@@ -97,21 +90,21 @@ if st.button("実行"):
         else:
             return price, None, None, 0, (0, 0)
         rr = abs((tp - price) / (sl - price))
-        pips = get_pips_multiplier(symbol)
-        return price, tp, sl, rr, (round(abs(tp - price) * pips), round(abs(sl - price) * pips))
+        pips_unit = 100 if "JPY" in symbol else 10000
+        return price, tp, sl, rr, ((tp - price) * pips_unit, (price - sl) * pips_unit)
 
-    def real_backtest(df, direction):
+    def backtest(df, direction):
         results = []
-        pips = get_pips_multiplier(symbol)
-        for i in range(len(df) - 30, len(df) - 15):
+        for i in range(len(df) - 15):
             price = df["close"].iloc[i]
             atr = df["close"].rolling(window=14).std().iloc[i]
             if atr == 0 or np.isnan(atr):
+                st.write(f"スキップ：インデックス {i}, ATR={atr}")
                 continue
             if direction == "買い":
                 sl = price - atr * 1.0
                 tp = price + atr * 1.6
-                future = df["close"].iloc[i+1:i+15]
+                future = df["close"].iloc[i + 1:i + 15]
                 if any(f <= sl for f in future):
                     results.append((df.index[i], price, sl, tp, "損切"))
                 elif any(f >= tp for f in future):
@@ -119,22 +112,26 @@ if st.button("実行"):
             elif direction == "売り":
                 sl = price + atr * 1.0
                 tp = price - atr * 1.6
-                future = df["close"].iloc[i+1:i+15]
+                future = df["close"].iloc[i + 1:i + 15]
                 if any(f >= sl for f in future):
                     results.append((df.index[i], price, sl, tp, "損切"))
                 elif any(f <= tp for f in future):
                     results.append((df.index[i], price, sl, tp, "利確"))
+        if len(results) == 0:
+            st.warning("⚠ バックテスト結果が0件です。ATRが0か、TP/SLがヒットしない可能性あり")
         return results
 
     st.subheader(f"通貨ペア：{symbol} | スタイル：{style}")
 
     final_scores = []
+    final_signals = []
     for tf in timeframes:
         df = fetch_data(symbol, tf)
         if df is None:
             continue
         df = calc_indicators(df)
         sig, guide, score = extract_signal(df)
+        final_signals.append((tf, sig, score, guide))
         st.markdown(f"### ⏱ {tf} 判定：{sig}")
         for g in guide:
             st.write("-", g)
@@ -144,32 +141,31 @@ if st.button("実行"):
     decision = "買い" if weighted_avg_score >= 0.6 else "待ち"
 
     df_all = fetch_data(symbol, timeframes[1])
-    df_all = calc_indicators(df_all)
-    entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(df_all, decision)
-    bt_results = real_backtest(df_all, decision)
-    wins = sum(1 for r in bt_results if r[-1] == "利確")
-    total = len(bt_results)
-    win_rate = wins / total if total > 0 else 0
+    if df_all is not None:
+        df_all = calc_indicators(df_all)
+        entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(df_all, decision)
+        bt_results = backtest(df_all, decision)
+        wins = sum(1 for r in bt_results if r[-1] == "利確")
+        total = len(bt_results)
+        win_rate = wins / total if total > 0 else 0
 
-    st.subheader("\n🧭 エントリーガイド（総合評価）")
-    if decision == "買い":
-        st.write(f"✅ {style} において複数の時間足が買いシグナルを示しています")
-        st.write("⏳ 中期・長期の上昇トレンドが短期にも波及")
-        st.write("📌 押し目が完了しており、エントリータイミングとして有効")
-    else:
-        st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
+        st.subheader("\n🧭 エントリーガイド（総合評価）")
+        if decision == "買い":
+            st.write(f"✅ {style} において複数の時間足が買いシグナルを示しています")
+            st.write("⏳ 中期・長期の上昇トレンドが短期にも波及")
+            st.write("📌 押し目が完了しており、エントリータイミングとして有効")
+        else:
+            st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
 
-    if decision != "待ち":
-        st.subheader("\n🎯 トレードプラン（想定）")
-        st.write(f"エントリーレート：{entry:.4f}")
-        st.write(f"指値（利確）：{tp:.4f}（+{pips_tp} pips）")
-        st.write(f"逆指値（損切）：{sl:.4f}（-{pips_sl} pips）")
-        st.write(f"リスクリワード比：{rr:.2f}")
-        st.write(f"想定勝率：{win_rate*100:.1f}%")
-    else:
-        st.subheader("現在はエントリー待ちです。")
+        if decision != "待ち":
+            st.subheader("\n🎯 トレードプラン（想定）")
+            st.write(f"エントリーレート：{entry:.4f}")
+            st.write(f"指値（利確）：{tp:.4f}（+{pips_tp:.0f} pips）")
+            st.write(f"逆指値（損切）：{sl:.4f}（-{pips_sl:.0f} pips）")
+            st.write(f"リスクリワード比：{rr:.2f}")
+            st.write(f"想定勝率：{win_rate*100:.1f}%")
 
-    with st.expander("バックテスト結果（直近15件）"):
-        df_bt = pd.DataFrame(bt_results, columns=["日時", "エントリー", "損切", "利確", "結果"])
-        st.dataframe(df_bt)
-        st.write(f"勝率：{win_rate*100:.1f}%  | 件数：{total}")
+        with st.expander("バックテスト結果（詳細）"):
+            df_bt = pd.DataFrame(bt_results, columns=["日時", "エントリー", "損切", "利確", "結果"])
+            st.dataframe(df_bt)
+            st.write(f"勝率：{win_rate*100:.1f}%  | 件数：{total}")
