@@ -16,6 +16,7 @@ style = st.selectbox("トレードスタイルを選択", ["スイング", "デ�
 
 if st.button("実行"):
 
+    # --- 時間足と重み定義 ---
     tf_map = {
         "スキャルピング": ["5min", "15min", "1h"],
         "デイトレード": ["15min", "1h", "4h"],
@@ -27,7 +28,7 @@ if st.button("実行"):
     timeframes = tf_map[style]
 
     def fetch_data(symbol, interval):
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
+        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=200&apikey={API_KEY}"
         r = requests.get(url)
         data = r.json()
         if "values" not in data:
@@ -49,97 +50,132 @@ if st.button("実行"):
         df["Upper"] = df["close"].rolling(window=20).mean() + 2 * df["close"].rolling(window=20).std()
         df["Lower"] = df["close"].rolling(window=20).mean() - 2 * df["close"].rolling(window=20).std()
         df["RCI"] = df["close"].rank().rolling(window=9).apply(lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1])
-        return df
+        df["ATR"] = df["close"].rolling(window=14).std()
+        return df.dropna()
 
-    def extract_signal(df):
-        guide = []
+    def extract_signal(row):
         buy_score = 0
         sell_score = 0
-        last = df.iloc[-1]
+        guide = []
 
         # MACD
-        if last["MACD"] > last["Signal"]:
+        if row["MACD"] > row["Signal"]:
             buy_score += 1
             guide.append("✅ MACDゴールデンクロス")
-        elif last["MACD"] < last["Signal"]:
-            sell_score += 1
-            guide.append("✅ MACDデッドクロス")
         else:
-            guide.append("❌ MACD未達")
+            sell_score += 1
+            guide.append("❌ MACDデッドクロス")
 
         # SMA
-        if last["SMA_5"] > last["SMA_20"]:
+        if row["SMA_5"] > row["SMA_20"]:
             buy_score += 1
             guide.append("✅ SMA短期 > 長期")
-        elif last["SMA_5"] < last["SMA_20"]:
-            sell_score += 1
-            guide.append("✅ SMA短期 < 長期")
         else:
-            guide.append("❌ SMA条件未達")
+            sell_score += 1
+            guide.append("❌ SMA短期 < 長期")
 
-        # Bollinger Band
-        if last["close"] < last["Lower"]:
+        # BB
+        if row["close"] < row["Lower"]:
             buy_score += 1
             guide.append("✅ BB下限反発の可能性")
-        elif last["close"] > last["Upper"]:
+        elif row["close"] > row["Upper"]:
             sell_score += 1
-            guide.append("✅ BB上限反発の可能性")
+            guide.append("✅ BB上限反落の可能性")
         else:
             guide.append("❌ BB反発無し")
 
         # RCI
-        if last["RCI"] > 0.5:
+        if row["RCI"] > 0.5:
             buy_score += 1
             guide.append("✅ RCI上昇傾向")
-        elif last["RCI"] < -0.5:
+        elif row["RCI"] < -0.5:
             sell_score += 1
             guide.append("✅ RCI下降傾向")
         else:
             guide.append("❌ RCI未達")
 
-        # スコア判定
-        signal = "買い" if buy_score >= 3 else "売り" if sell_score >= 3 else "待ち"
-        return signal, guide, buy_score, sell_score
+        if buy_score >= 3:
+            return "買い", guide, buy_score / 4
+        elif sell_score >= 3:
+            return "売り", guide, sell_score / 4
+        else:
+            return "待ち", guide, 0
+
+    def suggest_trade_plan(row, signal):
+        price = row["close"]
+        atr = row["ATR"]
+        if pd.isna(atr) or atr == 0:
+            return price, price, price, 0, (0, 0)
+
+        pip_unit = 100 if "/JPY" in symbol else 10000
+
+        if signal == "買い":
+            tp = price + atr * 1.6
+            sl = price - atr * 1.0
+        elif signal == "売り":
+            tp = price - atr * 1.6
+            sl = price + atr * 1.0
+        else:
+            return price, price, price, 0, (0, 0)
+
+        rr = abs((tp - price) / (sl - price))
+        return price, tp, sl, rr, (abs(tp - price) * pip_unit, abs(sl - price) * pip_unit)
+
+    def backtest(df):
+        logs = []
+        for i in range(-100, 0):
+            row = df.iloc[i]
+            signal, guide, score = extract_signal(row)
+            entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(row, signal)
+
+            logs.append({
+                "日時": row.name.strftime("%Y-%m-%d %H:%M"),
+                "終値": round(row["close"], 5),
+                "判定": signal,
+                "スコア": round(score, 2),
+                "利確(pips)": round(pips_tp),
+                "損切(pips)": round(pips_sl),
+                "RR比": round(rr, 2),
+                "根拠": " / ".join(guide)
+            })
+        return pd.DataFrame(logs)
 
     st.subheader(f"通貨ペア：{symbol} | スタイル：{style}")
 
-    final_buy_scores = []
-    final_sell_scores = []
-    final_signals = []
-
+    final_scores = []
     for tf in timeframes:
         df = fetch_data(symbol, tf)
         if df is None:
             continue
         df = calc_indicators(df)
-        sig, guide, buy_score, sell_score = extract_signal(df)
-        final_signals.append((tf, sig, buy_score, sell_score, guide))
+        latest = df.iloc[-1]
+        signal, guide, score = extract_signal(latest)
 
-        st.markdown(f"### ⏱ {tf} 判定：{sig}")
+        st.markdown(f"### ⏱ {tf} 判定：{signal}")
         for g in guide:
             st.write("-", g)
+        final_scores.append(score * tf_weights.get(tf, 0.3))
 
-        final_buy_scores.append(buy_score * tf_weights.get(tf, 0.3))
-        final_sell_scores.append(sell_score * tf_weights.get(tf, 0.3))
+    weighted_avg = sum(final_scores)
+    decision = "買い" if weighted_avg >= 0.6 else "売り" if weighted_avg <= 0.2 else "待ち"
 
-    # 総合スコア判定
-    weighted_buy = sum(final_buy_scores)
-    weighted_sell = sum(final_sell_scores)
+    df_all = fetch_data(symbol, timeframes[1])
+    df_all = calc_indicators(df_all)
+    latest = df_all.iloc[-1]
+    entry, tp, sl, rr, (pips_tp, pips_sl) = suggest_trade_plan(latest, decision)
 
-    if weighted_buy >= 0.6:
-        decision = "買い"
-    elif weighted_sell >= 0.6:
-        decision = "売り"
-    else:
-        decision = "待ち"
-
-    st.subheader("\n🧭 エントリーガイド（総合評価）")
-    if decision == "買い":
-        st.write(f"✅ {style} において複数の時間足が買いシグナルを示しています")
-        st.write("⏳ 中期・長期の上昇トレンドが短期にも波及")
-        st.write("📌 押し目が完了しており、エントリータイミングとして有効")
-    elif decision == "売り":
-        st.write(f"🔻 {style} において複数の時間足が売りシグナルを示しています")
-        st.write("📉 中期・長期の下降トレンドに入っており戻り売りが有効")
+    st.subheader("🧭 エントリーガイド（総合評価）")
+    if decision in ["買い", "売り"]:
+        st.write(f"✅ 複数の時間足が{decision}シグナルを示しています")
+        st.subheader("🎯 トレードプラン")
+        st.write(f"エントリーレート：{entry:.3f}")
+        st.write(f"指値（利確）：{tp:.3f}（+{pips_tp:.0f} pips）")
+        st.write(f"逆指値（損切）：{sl:.3f}（-{pips_sl:.0f} pips）")
+        st.write(f"リスクリワード比：{rr:.2f}")
     else:
         st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
+
+    st.subheader("📊 バックテスト結果（直近100本）")
+    bt_log = backtest(df_all)
+    st.dataframe(bt_log)
+    st.write(f"対象件数：{len(bt_log)}")
