@@ -1,162 +1,138 @@
-# --- ライブラリ ---
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# --- タイトル ---
-st.title("💱 FXトレード分析ツール")
+# --- APIキー設定 ---
+API_KEY = st.secrets["API_KEY"]
 
-# --- ユーザー入力 ---
+# --- ユーザーインターフェース ---
+st.title("FXトレード分析ツール")
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
-style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=1)
+style = st.selectbox("トレードスタイルを選択", ["スイング", "デイトレード", "スキャルピング"], index=1)
 
-# --- スタイルに応じた時間足とSMA設定 ---
+# --- 時間足設定 ---
 tf_map = {
     "スキャルピング": ["5min", "15min", "1h"],
     "デイトレード": ["15min", "1h", "4h"],
     "スイング": ["1h", "4h", "1day"]
 }
-tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.5}
-sma_periods = {"スキャルピング": (5, 20), "デイトレード": (10, 40), "スイング": (20, 80)}
-timeframes = tf_map[style]
-sma_short, sma_long = sma_periods[style]
+tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
 
-# --- ATRの取得関数 ---
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    return true_range.rolling(window=period).mean()
-
-# --- シグナル判定 ---
+# --- データ取得 ---
 def fetch_data(symbol, interval):
-    apikey = st.secrets["API_KEY"]
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=200&apikey={apikey}&format=JSON"
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
     r = requests.get(url)
     data = r.json()
     if "values" not in data:
         return None
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.sort_values("datetime").reset_index(drop=True)
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+    df.set_index("datetime", inplace=True)
+    df.sort_index(inplace=True)
+    df = df.astype(float)
     return df
 
-def analyze_signals(df):
-    df = df.copy()
-    df["SMA_S"] = df["close"].rolling(window=sma_short).mean()
-    df["SMA_L"] = df["close"].rolling(window=sma_long).mean()
+# --- インジケータ計算 ---
+def calc_indicators(df):
+    df["SMA_5"] = df["close"].rolling(window=5).mean()
+    df["SMA_20"] = df["close"].rolling(window=20).mean()
     df["MACD"] = df["close"].ewm(span=12).mean() - df["close"].ewm(span=26).mean()
     df["Signal"] = df["MACD"].ewm(span=9).mean()
-    df["Upper"] = df["close"].rolling(window=20).mean() + 2 * df["close"].rolling(window=20).std()
-    df["Lower"] = df["close"].rolling(window=20).mean() - 2 * df["close"].rolling(window=20).std()
-    df["RCI"] = df["close"].rank().rolling(window=9).apply(lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1])
-    df["ATR"] = calculate_atr(df)
-    
-    def judge(row):
-        guide = []
-        buy_score = 0
-        sell_score = 0
+    df["Upper"] = df["close"].rolling(20).mean() + 2 * df["close"].rolling(20).std()
+    df["Lower"] = df["close"].rolling(20).mean() - 2 * df["close"].rolling(20).std()
+    df["STD"] = df["close"].rolling(20).std()
+    df["RCI"] = df["close"].rank().rolling(window=9).apply(lambda x: np.corrcoef(np.arange(len(x)), x)[0,1])
+    df["TR"] = np.maximum.reduce([
+        df["high"] - df["low"],
+        abs(df["high"] - df["close"].shift()),
+        abs(df["low"] - df["close"].shift())
+    ])
+    df["ATR"] = df["TR"].rolling(window=14).mean()
+    df["+DM"] = np.where((df["high"] - df["high"].shift()) > (df["low"].shift() - df["low"]),
+                          np.maximum(df["high"] - df["high"].shift(), 0), 0)
+    df["-DM"] = np.where((df["low"].shift() - df["low"]) > (df["high"] - df["high"].shift()),
+                          np.maximum(df["low"].shift() - df["low"], 0), 0)
+    df["+DI"] = 100 * (df["+DM"].ewm(span=14).mean() / df["ATR"])
+    df["-DI"] = 100 * (df["-DM"].ewm(span=14).mean() / df["ATR"])
+    df["ADX"] = 100 * abs(df["+DI"] - df["-DI"]) / (df["+DI"] + df["-DI"])
+    return df
 
-        # MACD
-        if row["MACD"] > row["Signal"]:
-            buy_score += 1
-            guide.append("✅ MACDゴールデンクロス")
-        elif row["MACD"] < row["Signal"]:
-            sell_score += 1
-            guide.append("✅ MACDデッドクロス")
-        else:
-            guide.append("❌ MACD未達")
+# --- トレンド / レンジ判定 ---
+def detect_market_structure(df):
+    last = df.iloc[-1]
+    trend_votes = 0
+    range_votes = 0
 
-        # SMA
-        if row["SMA_S"] > row["SMA_L"]:
-            buy_score += 1
-            guide.append("✅ SMA短期 > 長期")
-        elif row["SMA_S"] < row["SMA_L"]:
-            sell_score += 1
-            guide.append("✅ SMA短期 < 長期")
-        else:
-            guide.append("❌ SMA条件未達")
+    # 1. ADX
+    if last["ADX"] > 25:
+        trend_votes += 1
+    elif last["ADX"] < 20:
+        range_votes += 1
 
-        # BB反発
-        if row["close"] < row["Lower"]:
-            buy_score += 1
-            guide.append("✅ BB下限反発の可能性")
-        elif row["close"] > row["Upper"]:
-            sell_score += 1
-            guide.append("✅ BB上限反発の可能性")
-        else:
-            guide.append("❌ BB反発無し")
-
-        # RCI
-        if row["RCI"] > 0.5:
-            buy_score += 1
-            guide.append("✅ RCI上昇傾向")
-        elif row["RCI"] < -0.5:
-            sell_score += 1
-            guide.append("✅ RCI下降傾向")
-        else:
-            guide.append("❌ RCI未達")
-
-        if buy_score >= 3:
-            decision = "買い"
-        elif sell_score >= 3:
-            decision = "売り"
-        else:
-            decision = "待ち"
-        
-        return decision, guide, buy_score, sell_score
-
-    latest = df.iloc[-1]
-    decision, guide, bscore, sscore = judge(latest)
-    return decision, guide, bscore, sscore, df
-
-# --- 実行 ---
-if st.button("実行"):
-    st.markdown(f"## 💱 通貨ペア：{symbol} | スタイル：{style}\n\n")
-    final_scores = []
-    total_guide = []
-    all_decisions = []
-    
-    for tf in timeframes:
-        df = fetch_data(symbol, tf)
-        if df is None:
-            st.error(f"{tf} のデータ取得に失敗")
-            continue
-        decision, guide, b, s, df = analyze_signals(df)
-        score = b if decision == "買い" else s if decision == "売り" else 0
-        weighted_score = score * tf_weights.get(tf, 0.3)
-        final_scores.append(weighted_score)
-        all_decisions.append(decision)
-
-        st.markdown(f"### ⏱ {tf} 判定：{decision}（スコア：{score:.1f}）")
-        for g in guide:
-            st.write("-", g)
-
-    avg_score = sum(final_scores)
-    buy_count = all_decisions.count("買い")
-    sell_count = all_decisions.count("売り")
-    
-    if buy_count >= 2:
-        final_decision = "買い"
-    elif sell_count >= 2:
-        final_decision = "売り"
+    # 2. SMA乖離
+    sma_diff_ratio = abs(last["SMA_5"] - last["SMA_20"]) / last["close"]
+    if sma_diff_ratio > 0.015:
+        trend_votes += 1
     else:
-        final_decision = "待ち"
+        range_votes += 1
 
-    st.markdown("\n---\n")
-    st.subheader("🧭 エントリーガイド（総合評価）")
-    if final_decision == "買い":
-        st.write(f"✅ {style} において複数の時間足が買いシグナルを示しています")
-        st.write("⏳ 中期・長期の上昇トレンドが短期にも波及")
-        st.write("📌 押し目が完了しており、エントリータイミングとして有効")
-    elif final_decision == "売り":
-        st.write(f"✅ {style} において複数の時間足が売りシグナルを示しています")
-        st.write("⏳ 中期・長期の下降トレンドが短期にも波及")
-        st.write("📌 戻りの終盤でエントリーの好機")
+    # 3. 標準偏差
+    if last["STD"] > (last["close"] * 0.005):
+        trend_votes += 1
     else:
-        st.write("現在は明確な買い/売りシグナルが不足しているため、エントリーは控えめに")
+        range_votes += 1
+
+    return "トレンド" if trend_votes >= 2 else "レンジ"
+
+# --- 売買個別スコア判定 ---
+def extract_signal(df):
+    last = df.iloc[-1]
+    logs = []
+    buy_score = 0
+    sell_score = 0
+
+    if last["MACD"] > last["Signal"]:
+        buy_score += 1
+        logs.append("✅ MACDゴールデンクロス")
+    else:
+        sell_score += 1
+        logs.append("✅ MACDデッドクロス")
+
+    if last["SMA_5"] > last["SMA_20"]:
+        buy_score += 1
+        logs.append("✅ SMA短期 > 長期")
+    else:
+        sell_score += 1
+        logs.append("✅ SMA短期 < 長期")
+
+    if last["close"] < last["Lower"]:
+        buy_score += 1
+        logs.append("✅ BB下限反発")
+    elif last["close"] > last["Upper"]:
+        sell_score += 1
+        logs.append("✅ BB上限反発")
+    else:
+        logs.append("❌ BB反発無し")
+
+    if last["RCI"] > 0.5:
+        buy_score += 1
+        logs.append("✅ RCI上昇傾向")
+    elif last["RCI"] < -0.5:
+        sell_score += 1
+        logs.append("✅ RCI下降傾向")
+    else:
+        logs.append("❌ RCI未達")
+
+    if buy_score >= 3:
+        decision = "買い"
+        score = buy_score
+    elif sell_score >= 3:
+        decision = "売り"
+        score = sell_score
+    else:
+        decision = "待ち"
+        score = max(buy_score, sell_score)
+
+    return decision, logs, score
