@@ -164,3 +164,80 @@ def backtest(df):
     win_rate = (win / total) * 100 if total > 0 else 0
     total_pips = sum([l["損益(pips)"] for l in log])
     return win_rate, total_pips, pd.DataFrame(log)
+
+if st.button("実行"):
+    timeframes = tf_map[style]
+    st.subheader(f"\n\U0001F4B1 通貨ペア：{symbol} | スタイル：{style}\n\n⸻")
+    st.markdown("### ⏱ 各時間足シグナル詳細\n\n凡例：🟢=買い条件達成、🔴=売り条件達成、⚪=未達")
+
+    total_buy_score = 0
+    total_sell_score = 0
+    df_all = None
+
+    for tf in timeframes:
+        df = fetch_data(symbol, tf)
+        if df is None:
+            st.error(f"{tf} のデータ取得に失敗しました")
+            continue
+        df = calc_indicators(df)
+        buy_score, sell_score, logs = extract_signal(df)
+        weight = tf_weights.get(tf, 0.3)
+        total_buy_score += buy_score * weight
+        total_sell_score += sell_score * weight
+
+        st.markdown(f"\n⏱ {tf} 判定：買 {buy_score} / 売 {sell_score}")
+        for log in logs:
+            st.markdown(f"{log}")
+        if tf == timeframes[1]:
+            df_all = df.copy()
+
+    st.markdown("\n⸻")
+    st.markdown("### 🧭 エントリーガイド（総合評価）")
+    st.write(f"総合スコア：{total_buy_score:.2f}（買） / {total_sell_score:.2f}（売）")
+
+    for i, tf in enumerate(timeframes):
+        weight = tf_weights.get(tf, 0.3)
+        df = fetch_data(symbol, tf)
+        if df is not None:
+            buy_score, sell_score, _ = extract_signal(df)
+            st.write(f"• {tf}：買 {buy_score} × 重み {weight} = {buy_score * weight:.2f} / 売 {sell_score} × 重み {weight} = {sell_score * weight:.2f}")
+
+    # 補完ロジック含めた判定
+    if total_buy_score >= 2.4 and total_buy_score > total_sell_score:
+        decision = "買い"
+    elif total_sell_score >= 2.4 and total_sell_score > total_buy_score:
+        decision = "売り"
+    elif abs(total_buy_score - total_sell_score) >= 0.8:
+        decision = "買い" if total_buy_score > total_sell_score else "売り"
+        st.info("⚠ 機会損失防止のため補完判定を実施")
+    else:
+        decision = "待ち"
+
+    if decision == "買い":
+        st.success("✅ 買いエントリーの可能性が高いです")
+    elif decision == "売り":
+        st.warning("✅ 売りエントリーの可能性が高いです")
+    else:
+        st.write("⏸ 現在は明確なシグナルが不足しています")
+
+    st.markdown("\n⸻")
+    if df_all is not None:
+        price = df_all["close"].iloc[-1]
+        atr = df_all["close"].rolling(window=14).std().iloc[-1]
+        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, decision)
+
+        st.markdown("### 🎯 トレードプラン（想定）")
+        if decision != "待ち":
+            st.write(f"• エントリーレート：{entry:.2f}")
+            st.write(f"• 指値（利確）：{tp:.2f}（+{int(ptp)} pips）")
+            st.write(f"• 逆指値（損切）：{sl:.2f}（−{int(psl)} pips）")
+            st.write(f"• リスクリワード比：{rr:.2f}")
+        else:
+            st.write("現在はエントリー待機です。")
+
+        win_rate, total_pips, bt_df = backtest(df_all)
+
+        st.markdown("### 📈 バックテスト結果（最大100件）")
+        st.write(f"勝率：{win_rate:.1f}%（{int(win_rate)}勝 / {len(bt_df)}件）")
+        st.write(f"合計損益：{total_pips:+.0f} pips")
+        st.dataframe(bt_df)
