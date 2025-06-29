@@ -178,9 +178,12 @@ if st.button("実行"):
     st.markdown(f"総合スコア：{total_buy:.2f}（買） / {total_sell:.2f}（売）")
     for tf, b, s, w in score_details:
         st.markdown(f"　• {tf}：買 {b} × {w} = {b*w:.2f} / 売 {s} × {w} = {s*w:.2f}")
-    st.success("✅ 買いシグナル") if decision == "買い" else \
-    st.warning("✅ 売りシグナル") if decision == "売り" else \
-    st.info("⏸ エントリー見送り")
+    if decision == "買い":
+       st.success("✅ 買いシグナル")
+    elif decision == "売り":
+       st.warning("✅ 売りシグナル")
+    else:
+       st.info("⏸ エントリー見送り")
 
     st.markdown("---\n### 🎯 トレードプラン")
     price = main_df["close"].iloc[-1]
