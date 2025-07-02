@@ -2,14 +2,17 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import json
+from datetime import datetime, timedelta
 
 # --- APIキー ---
 API_KEY = st.secrets["API_KEY"]
 
 # --- UI ---
-st.title("FXシグナル判定ツール")
+st.title("FXトレード分析ツール")
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=0)
 style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=2)
+use_dummy = st.checkbox("✅ ダミーデータで実行（API節約）", value=False)
 
 # --- 時間足と重み ---
 tf_map = {
@@ -18,33 +21,43 @@ tf_map = {
     "スイング": ["1h", "4h", "1day"]
 }
 tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
+tf_order = ["5min", "15min", "1h", "4h", "1day"]
 
-# --- データ取得（APIエラー可視化対応） ---
-@st.cache_data(ttl=600)
+# --- ダミーデータ生成 ---
+def generate_dummy_data():
+    now = datetime.utcnow()
+    times = pd.date_range(end=now, periods=200, freq="H")
+    df = pd.DataFrame(index=times)
+    df["open"] = np.random.uniform(100, 110, len(times))
+    df["high"] = df["open"] + np.random.uniform(0, 1, len(times))
+    df["low"] = df["open"] - np.random.uniform(0, 1, len(times))
+    df["close"] = df["open"] + np.random.uniform(-0.5, 0.5, len(times))
+    df.index.name = "datetime"
+    return df
+
+# --- データ取得関数 ---
+@st.cache_data(ttl=1800)
 def fetch_data(symbol, interval):
+    if use_dummy:
+        return generate_dummy_data()
+
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
     try:
-        r = requests.get(url, timeout=10)
-        data = r.json()
+        response = requests.get(url)
+        data = response.json()
         if "values" not in data:
-            error_msg = data.get("message", "APIレスポンスに 'values' が含まれていません")
-            st.error(f"❌ APIエラー発生：{error_msg}")
-            st.json(data)
-            return None
+            raise ValueError(f"❌ APIエラー発生：{json.dumps(data, indent=2)}")
         df = pd.DataFrame(data["values"])
         df["datetime"] = pd.to_datetime(df["datetime"])
         df.set_index("datetime", inplace=True)
         df = df.sort_index()
         df = df.astype(float)
         return df
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ 通信エラー: {str(e)}")
-        return None
     except Exception as e:
-        st.error(f"❌ 予期せぬエラー: {str(e)}")
+        st.error(f"データ取得失敗：{e}")
         return None
 
-# --- インジケーター計算 ---
+# --- インジケータ計算 ---
 def calc_indicators(df):
     df["SMA_5"] = df["close"].rolling(5).mean()
     df["SMA_20"] = df["close"].rolling(20).mean()
@@ -83,11 +96,13 @@ def extract_signal(df):
     if last["RCI"] > 0.5: buy += 1; logs.append("🟢 RCI上昇傾向")
     elif last["RCI"] < -0.5: sell += 1; logs.append("🔴 RCI下降傾向")
     else: logs.append("⚪ RCI未達")
-    return ("買い" if buy >= 3 and buy > sell else
-            "売り" if sell >= 3 and sell > buy else
-            "待ち"), logs, buy, sell
+    return (
+        "買い" if buy >= 3 and buy > sell else
+        "売り" if sell >= 3 and sell > buy else
+        "待ち"
+    ), logs, buy, sell
 
-# --- 実行 ---
+    # --- 実行ボタン ---
 if st.button("実行"):
     timeframes = tf_map[style]
     total_buy_score = total_sell_score = 0
@@ -97,12 +112,13 @@ if st.button("実行"):
     st.markdown("### ⏱ 各時間足シグナル詳細\n\n凡例：🟢=買い、🔴=売り、⚪=未達")
 
     for tf in timeframes:
-        df = fetch_data(symbol.replace("/", ""), tf)
-        if df is None:
+        df = fetch_data(symbol_api, tf)
+        if df is None or len(df) < 30:
+            st.error(f"{tf}のデータ取得に失敗または不十分です")
             continue
         df = calc_indicators(df)
         sig, logs, b, s = extract_signal(df)
-        weight = tf_weights[tf]
+        weight = tf_weights.get(tf, 0.3)
         total_buy_score += b * weight
         total_sell_score += s * weight
         score_log.append((tf, b, s, weight))
@@ -110,7 +126,7 @@ if st.button("実行"):
         for log in logs:
             st.markdown(log)
 
-    # --- 総合評価 ---
+    # --- エントリーガイド ---
     st.markdown("⸻\n### 🧭 エントリーガイド（総合評価）")
     if total_buy_score >= 2.4 and total_buy_score > total_sell_score:
         decision = "買い"
@@ -124,9 +140,11 @@ if st.button("実行"):
     st.markdown(f"総合スコア：{total_buy_score:.2f}（買） / {total_sell_score:.2f}（売）")
     for tf, b, s, w in score_log:
         st.markdown(f"　• {tf}：買 {b} × {w} = {b*w:.2f} / 売 {s} × {w} = {s*w:.2f}")
+
     if decision == "買い":
         st.success("✅ 買いシグナル")
     elif decision == "売り":
         st.warning("✅ 売りシグナル")
     else:
         st.info("⏸ エントリー見送り")
+        
