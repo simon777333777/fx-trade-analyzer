@@ -4,143 +4,158 @@ import requests
 import ta
 from datetime import datetime
 
-# --- APIキー ---
+# --- APIキー（安全に読み込み） ---
 API_KEY = st.secrets["API_KEY"]
 
-# --- 通貨ペアと時間足選択 ---
-st.title("📊 FXシグナル分析ツール")
-symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY"])
+# --- データ取得関数（キャッシュ付き） ---
+@st.cache_data
+def fetch_data(symbol, interval, limit=200):
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&apikey={API_KEY}&outputsize={limit}&order=desc"
+    response = requests.get(url)
+    data = response.json()
+    if "values" not in data:
+        raise ValueError(f"APIデータ取得エラー: {data}")
+    df = pd.DataFrame(data["values"])
+    df = df.rename(columns={"datetime": "time"})
+    df["time"] = pd.to_datetime(df["time"])
+    df = df.astype({
+        "open": "float",
+        "high": "float",
+        "low": "float",
+        "close": "float",
+        "volume": "float"
+    })
+    df = df.sort_values("time").reset_index(drop=True)
+    return df
+
+# --- インジケーター計算 ---
+def add_indicators(df):
+    df["MACD"] = ta.trend.macd_diff(df["close"])
+    df["SMA_fast"] = ta.trend.sma_indicator(df["close"], window=5)
+    df["SMA_slow"] = ta.trend.sma_indicator(df["close"], window=20)
+    bb = ta.volatility.BollingerBands(df["close"], window=20)
+    df["BB_upper"] = bb.bollinger_hband()
+    df["BB_lower"] = bb.bollinger_lband()
+    df["RCI"] = df["close"].rolling(9).apply(lambda s: pd.Series(s).rank().corr(pd.Series(range(len(s)))))
+    return df
+
+# --- 市場構造（トレンド or レンジ）判定 ---
+def detect_market_structure(df):
+    sma_fast = ta.trend.sma_indicator(df["close"], window=5)
+    sma_slow = ta.trend.sma_indicator(df["close"], window=20)
+    adx = ta.trend.adx(df["high"], df["low"], df["close"])
+    std = df["close"].rolling(window=20).std()
+    recent_adx = adx.iloc[-1]
+    recent_std = std.iloc[-1]
+    if recent_adx > 25 and abs(sma_fast.iloc[-1] - sma_slow.iloc[-1]) > recent_std * 0.5:
+        return "トレンド"
+    else:
+        return "レンジ"
+
+# --- シグナル判定ロジック（トレンドフォロー、逆張り、ローソク、ダウ理論簡易対応） ---
+def judge_signal(df, market_type):
+    latest = df.iloc[-1]
+    result = {"score_buy": 0, "score_sell": 0, "log": [], "structure": market_type}
+
+    # MACDクロス
+    if df["MACD"].iloc[-1] > 0:
+        result["score_buy"] += 1
+        result["log"].append("🟢 MACDゴールデンクロス")
+    else:
+        result["score_sell"] += 1
+        result["log"].append("🔴 MACDデッドクロス")
+
+    # SMA順序
+    if df["SMA_fast"].iloc[-1] > df["SMA_slow"].iloc[-1]:
+        result["score_buy"] += 1
+        result["log"].append("🟢 SMA短期 > 長期")
+    else:
+        result["score_sell"] += 1
+        result["log"].append("🔴 SMA短期 < 長期")
+
+    # BB反発（逆張り）
+    close = df["close"].iloc[-1]
+    bb_upper = df["BB_upper"].iloc[-1]
+    bb_lower = df["BB_lower"].iloc[-1]
+    if close < bb_lower * 1.01:
+        result["score_buy"] += 1
+        result["log"].append("🟢 BB下限反発の可能性")
+    elif close > bb_upper * 0.99:
+        result["score_sell"] += 1
+        result["log"].append("🔴 BB上限反発の可能性")
+    else:
+        result["log"].append("⚪ BB反発無し")
+
+    # RCI
+    rci = df["RCI"].iloc[-1]
+    if rci > 0.3:
+        result["score_buy"] += 1
+        result["log"].append("🟢 RCI上昇傾向")
+    elif rci < -0.3:
+        result["score_sell"] += 1
+        result["log"].append("🔴 RCI下降傾向")
+    else:
+        result["log"].append("⚪ RCI未達")
+
+    return result
+
+# --- Streamlit画面構成 ---
+st.title("📊 FXシグナル判定ツール（軽量・精度重視）")
+
+symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD", "EUR/JPY"])
 style = st.selectbox("トレードスタイル", ["デイトレード", "スイング"])
+symbol_api = symbol.replace("/", "")
+
+# 時間足構成（スタイル別）
 timeframes = {
     "デイトレード": ["15min", "1h", "4h"],
     "スイング": ["1h", "4h", "1day"]
 }[style]
 
-# --- データ取得関数 ---
-@st.cache_data(show_spinner=False)
-def fetch_data(symbol, interval):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}&format=JSON"
-    r = requests.get(url)
-    data = r.json()
-    df = pd.DataFrame(data["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df.set_index("datetime", inplace=True)
-    df = df.astype(float)
-    df = df.sort_index()
-    return df
+weights = {
+    "デイトレード": [0.3, 0.3, 0.3],
+    "スイング": [0.3, 0.3, 0.4]
+}[style]
 
-# --- テクニカル指標計算 ---
-def calculate_indicators(df):
-    df["sma_fast"] = ta.trend.sma_indicator(df["close"], window=10)
-    df["sma_slow"] = ta.trend.sma_indicator(df["close"], window=20)
-    df["macd"] = ta.trend.macd_diff(df["close"])
-    bb = ta.volatility.BollingerBands(df["close"])
-    df["bb_high"] = bb.bollinger_hband()
-    df["bb_low"] = bb.bollinger_lband()
-    df["rci"] = df["close"].rolling(window=9).apply(lambda x: pd.Series(x).rank().corr(pd.Series(range(len(x)))), raw=False)
-    return df
+df_dict, signals = {}, []
 
-# --- シグナル判定 ---
-def analyze_signals(df, tf_name):
-    df = calculate_indicators(df)
-    latest = df.iloc[-1]
-
-    market_structure = "レンジ"  # 現時点はレンジ固定（後でADX等で改善可）
-    score_buy, score_sell = 0, 0
-    signals = []
-
-    # --- トレンドフォロー（MACD・SMA） ---
-    if latest["macd"] > 0:
-        score_buy += 1
-        signals.append("🟢 MACDゴールデンクロス")
-    else:
-        score_sell += 1
-        signals.append("🔴 MACDデッドクロス")
-
-    if latest["sma_fast"] > latest["sma_slow"]:
-        score_buy += 1
-        signals.append("🟢 SMA短期 > 長期")
-    else:
-        score_sell += 1
-        signals.append("🔴 SMA短期 < 長期")
-
-    # --- レンジ逆張り型（BB反発） ---
-    if latest["close"] < latest["bb_low"] * 1.005:
-        score_buy += 1
-        signals.append("🟢 BB下限反発の可能性")
-    elif latest["close"] > latest["bb_high"] * 0.995:
-        score_sell += 1
-        signals.append("🔴 BB上限反発の可能性")
-    else:
-        signals.append("⚪ BB反発無し")
-
-    # --- オシレーター系（RCI） ---
-    if latest["rci"] > 0.5:
-        score_buy += 1
-        signals.append("🟢 RCI上昇傾向")
-    elif latest["rci"] < -0.5:
-        score_sell += 1
-        signals.append("🔴 RCI下降傾向")
-    else:
-        signals.append("⚪ RCI未達")
-
-    # 判定
-    if score_buy >= 3 and score_buy > score_sell:
-        decision = "買い"
-    elif score_sell >= 3 and score_sell > score_buy:
-        decision = "売り"
-    else:
-        decision = "待ち"
-
-    return {
-        "timeframe": tf_name,
-        "market": market_structure,
-        "decision": decision,
-        "score_buy": score_buy,
-        "score_sell": score_sell,
-        "signals": signals
-    }
-
-# --- 総合スコア評価 ---
-def summarize_signals(results):
-    weight = {"15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
-    total_buy = total_sell = 0
-    log = []
-    for res in results:
-        w = weight[res["timeframe"]]
-        buy_score = res["score_buy"] * w
-        sell_score = res["score_sell"] * w
-        total_buy += buy_score
-        total_sell += sell_score
-        log.append(f"• {res['timeframe']}: 買 {res['score_buy']} × {w} = {buy_score:.2f} / 売 {res['score_sell']} × {w} = {sell_score:.2f}")
-    return total_buy, total_sell, log
-
-# --- 表示実行 ---
-results = []
+# 各時間足でデータ取得と判定
 for tf in timeframes:
-    df = fetch_data(symbol.replace("/", ""), tf)
-    res = analyze_signals(df, tf)
-    results.append(res)
+    df = fetch_data(symbol_api, tf)
+    df = add_indicators(df)
+    market_type = detect_market_structure(df)
+    sig = judge_signal(df, market_type)
+    df_dict[tf] = df
+    signals.append(sig)
 
-# --- 各時間足シグナル詳細表示 ---
-st.subheader("⏱ 各時間足シグナル詳細")
-for res in results:
-    st.markdown(f"**⏱ {res['timeframe']} 判定：{res['decision']}（スコア：{res['score_buy'] if res['decision']=='買い' else res['score_sell']}）**")
-    st.markdown(f"• 市場判定：{res['market']}")
-    for sig in res["signals"]:
-        st.write(sig)
+# --- 出力表示 ---
+st.markdown(f"### 📊 通貨ペア：{symbol} | スタイル：{style}")
+st.markdown("### ⏱ 各時間足シグナル詳細\n凡例：🟢=買い、🔴=売り、⚪=未達")
+
+buy_total = 0
+sell_total = 0
+
+for i, tf in enumerate(timeframes):
+    sig = signals[i]
+    buy_score = sig["score_buy"]
+    sell_score = sig["score_sell"]
+    buy_total += buy_score * weights[i]
+    sell_total += sell_score * weights[i]
+    st.markdown(f"⏱ {tf} 判定：{'買い' if buy_score > sell_score else '売り' if sell_score > buy_score else '待ち'}（スコア：{max(buy_score, sell_score)}）")
+    st.markdown(f"• 市場判定：{sig['structure']}")
+    for line in sig["log"]:
+        st.markdown(line)
 
 # --- 総合評価 ---
-st.markdown("---")
-st.subheader("🧭 エントリーガイド（総合評価）")
-total_buy, total_sell, logs = summarize_signals(results)
-for log in logs:
-    st.write(log)
-st.markdown(f"**総合スコア：{total_buy:.2f}（買） / {total_sell:.2f}（売）**")
+st.markdown("### 🧭 エントリーガイド（総合評価）")
+st.markdown(f"総合スコア：{round(buy_total, 2)}（買） / {round(sell_total, 2)}（売）")
+for i, tf in enumerate(timeframes):
+    st.markdown(f"• {tf}：買 {signals[i]['score_buy']} × {weights[i]} = {round(signals[i]['score_buy']*weights[i], 2)} / 売 {signals[i]['score_sell']} × {weights[i]} = {round(signals[i]['score_sell']*weights[i], 2)}")
 
-if total_buy >= 2.5 and total_buy > total_sell:
+# 判定表示
+if buy_total > sell_total and buy_total >= 1.5:
     st.success("✅ 買いシグナル")
-elif total_sell >= 2.5 and total_sell > total_buy:
+elif sell_total > buy_total and sell_total >= 1.5:
     st.warning("✅ 売りシグナル")
 else:
     st.info("⏸ エントリー見送り")
