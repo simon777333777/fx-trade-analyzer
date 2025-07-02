@@ -3,12 +3,12 @@ import pandas as pd
 import numpy as np
 import requests
 
-# --- モード設定: "api" or "dummy" ---
-mode = "dummy"  # ← 切替可能
-
 # --- APIキー ---
-if mode == "api":
-    API_KEY = st.secrets["API_KEY"]
+API_KEY = st.secrets["API_KEY"]
+
+# --- ダミーデータ切り替え ---
+use_dummy = st.sidebar.checkbox("ダミーデータモード（API節約）", value=True)
+mode = "dummy" if use_dummy else "api"
 
 # --- UI ---
 st.title("FXトレード分析ツール")
@@ -25,37 +25,34 @@ tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
 
 # --- ダミーデータ生成 ---
 def get_dummy_data():
-    rng = pd.date_range(end=pd.Timestamp.now(), periods=100, freq="H")
-    data = {
-        "datetime": rng,
-        "open": np.random.rand(100) * 150 + 50,
-        "high": np.random.rand(100) * 150 + 50,
-        "low": np.random.rand(100) * 150 + 50,
-        "close": np.random.rand(100) * 150 + 50,
-        "volume": np.random.rand(100) * 1000,
-    }
-    df = pd.DataFrame(data)
+    np.random.seed(42)
+    date_rng = pd.date_range(end=pd.Timestamp.now(), periods=100, freq='H')
+    df = pd.DataFrame(date_rng, columns=['datetime'])
+    df['open'] = np.random.uniform(100, 110, size=(100,))
+    df['high'] = df['open'] + np.random.uniform(0, 1, size=(100,))
+    df['low'] = df['open'] - np.random.uniform(0, 1, size=(100,))
+    df['close'] = df['open'] + np.random.uniform(-0.5, 0.5, size=(100,))
+    df['volume'] = np.random.randint(1000, 2000, size=(100,))
     df.set_index("datetime", inplace=True)
-    df = df.sort_index()
     return df
 
-# --- データ取得 ---
-@st.cache_data(ttl=3600)
+# --- データ取得関数（API or ダミー） ---
+@st.cache_data
 def fetch_data(symbol, interval):
     if mode == "dummy":
         return get_dummy_data()
-    else:
-        url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
-        r = requests.get(url)
-        data = r.json()
-        if "values" not in data:
-            raise ValueError(f"❌ APIエラー発生：{data}")
-        df = pd.DataFrame(data["values"])
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df.set_index("datetime", inplace=True)
-        df = df.astype(float)
-        df = df.sort_index()
-        return df
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
+    r = requests.get(url)
+    data = r.json()
+    if "values" not in data:
+        st.error(f"❌ APIエラー発生：{data.get('message', 'Unknown error')}")
+        return None
+    df = pd.DataFrame(data["values"])
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df.set_index("datetime", inplace=True)
+    df = df.sort_index()
+    df = df.astype(float)
+    return df
 
 # --- インジケーター計算 ---
 def calc_indicators(df):
@@ -70,7 +67,7 @@ def calc_indicators(df):
     df["STD"] = df["close"].rolling(20).std()
     return df
 
-# --- 市場判定 ---
+# --- 市場構造判定 ---
 def detect_market_structure(last):
     trend = 0
     if last["ADX"] > 25: trend += 1
@@ -111,13 +108,11 @@ if st.button("実行"):
 
     for tf in timeframes:
         symbol_api = symbol.replace("/", "")
-        try:
-            df = fetch_data(symbol_api, tf)
-            df = calc_indicators(df)
-        except Exception as e:
-            st.error(f"{tf}のデータ取得失敗：{e}")
+        df = fetch_data(symbol_api, tf)
+        if df is None:
+            st.error(f"{tf}のデータ取得に失敗")
             continue
-
+        df = calc_indicators(df)
         sig, logs, b, s = extract_signal(df)
         weight = tf_weights[tf]
         total_buy_score += b * weight
@@ -127,7 +122,7 @@ if st.button("実行"):
         for log in logs:
             st.markdown(log)
 
-    st.markdown("---\n### 🧭 エントリーガイド（総合評価）")
+    st.markdown("⸻\n### 🧭 エントリーガイド（総合評価）")
     if total_buy_score >= 2.4 and total_buy_score > total_sell_score:
         decision = "買い"
     elif total_sell_score >= 2.4 and total_sell_score > total_buy_score:
