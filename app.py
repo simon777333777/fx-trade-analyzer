@@ -112,7 +112,7 @@ if st.button("実行"):
     st.markdown("### ⏱ 各時間足シグナル詳細\n\n凡例：🟢=買い、🔴=売り、⚪=未達")
 
     for tf in timeframes:
-        df = fetch_data(symbol_api, tf)
+        df = fetch_data(symbol, tf)
         if df is None or len(df) < 30:
             st.error(f"{tf}のデータ取得に失敗または不十分です")
             continue
