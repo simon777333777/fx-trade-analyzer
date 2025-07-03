@@ -3,18 +3,15 @@ import pandas as pd
 import numpy as np
 import requests
 
-# --- APIキー ---
+st.set_page_config(page_title="FXトレード分析", layout="centered")
+
 API_KEY = st.secrets["API_KEY"]
 
 # --- UI ---
 st.title("FXトレード分析ツール")
-symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], key="symbol_box")
-style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], key="style_box")
-use_dummy = st.checkbox("ダミーデータを使用する（API制限回避）", key="dummy_checkbox")
-
-# --- ログ表示 ---
-st.write(f"✅ 選択通貨ペア: {symbol}")
-st.write(f"✅ ダミーモード: {'ON' if use_dummy else 'OFF'}")
+symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
+style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=2)
+use_dummy = st.checkbox("📦 ダミーデータで実行", value=False)
 
 # --- 時間足と重み ---
 tf_map = {
@@ -26,27 +23,29 @@ tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
 
 # --- ダミーデータ生成 ---
 def get_dummy_data():
-    date_rng = pd.date_range(end=pd.Timestamp.now(), periods=100, freq='H')
-    df = pd.DataFrame(date_rng, columns=['datetime'])
-    df["open"] = np.random.uniform(100, 110, size=(100,))
-    df["high"] = df["open"] + np.random.uniform(0, 1, size=(100,))
-    df["low"] = df["open"] - np.random.uniform(0, 1, size=(100,))
-    df["close"] = df["open"] + np.random.uniform(-0.5, 0.5, size=(100,))
-    df["volume"] = np.random.randint(100, 1000, size=(100,))
-    df.set_index("datetime", inplace=True)
-    return df
+    idx = pd.date_range(end=pd.Timestamp.now(), periods=150, freq="H")
+    np.random.seed(0)
+    price = np.cumsum(np.random.randn(len(idx))) + 150
+    return pd.DataFrame({
+        "datetime": idx,
+        "open": price + np.random.randn(len(idx)),
+        "high": price + 1,
+        "low": price - 1,
+        "close": price,
+        "volume": 1000
+    }).set_index("datetime")
 
-# --- APIからデータ取得 ---
-@st.cache_data(show_spinner=False)
+# --- APIデータ取得 ---
+@st.cache_data(ttl=300)
 def fetch_data(symbol, interval):
     if use_dummy:
         return get_dummy_data()
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=100&apikey={API_KEY}"
+
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
     r = requests.get(url)
     data = r.json()
     if "values" not in data:
-        st.error(f"{interval} のデータ取得に失敗: APIデータ取得エラー: {data}")
-        return None
+        raise ValueError(f"APIデータ取得エラー: {data}")
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df.set_index("datetime", inplace=True)
@@ -54,7 +53,7 @@ def fetch_data(symbol, interval):
     df = df.astype(float)
     return df
 
-# --- インジケータ計算 ---
+# --- インジケータ ---
 def calc_indicators(df):
     df["SMA_5"] = df["close"].rolling(5).mean()
     df["SMA_20"] = df["close"].rolling(20).mean()
@@ -67,101 +66,96 @@ def calc_indicators(df):
     df["STD"] = df["close"].rolling(20).std()
     return df
 
-# --- 市場構造判定 ---
+# --- 市場構造判定（トレンド or レンジ） ---
 def detect_market_structure(last):
     trend = 0
     if last["ADX"] > 25: trend += 1
-    elif last["ADX"] < 20: trend -= 1
     if abs(last["SMA_5"] - last["SMA_20"]) / last["close"] > 0.015: trend += 1
-    else: trend -= 1
     if last["STD"] > last["close"] * 0.005: trend += 1
-    else: trend -= 1
     return "トレンド" if trend >= 2 else "レンジ"
 
-# --- ダウ理論判定 ---
-def detect_dow_theory(df):
-    highs = df["high"].rolling(3).apply(lambda x: x[1] > x[0] and x[1] > x[2])
-    lows = df["low"].rolling(3).apply(lambda x: x[1] < x[0] and x[1] < x[2])
-    return highs.iloc[-5:].sum(), lows.iloc[-5:].sum()
-
-# --- プライスアクション判定 ---
-def detect_price_action(df):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    if last["close"] > last["open"] and prev["close"] < prev["open"] and last["close"] > prev["open"]:
-        return "bullish_engulfing"
-    elif last["close"] < last["open"] and prev["close"] > prev["open"] and last["close"] < prev["open"]:
-        return "bearish_engulfing"
-    return None
-
-# --- シグナル抽出 ---
+# --- シグナル抽出（重み調整付き） ---
 def extract_signal(df):
     last = df.iloc[-1]
-    logs = [f"• 市場判定：{detect_market_structure(last)}"]
+    market = detect_market_structure(last)
+    logs = [f"• 市場判定：{market}"]
     buy = sell = 0
-    if last["MACD"] > last["Signal"]: buy += 1; logs.append("🟢 MACDゴールデンクロス")
-    else: sell += 1; logs.append("🔴 MACDデッドクロス")
-    if last["SMA_5"] > last["SMA_20"]: buy += 1; logs.append("🟢 SMA短期 > 長期")
-    else: sell += 1; logs.append("🔴 SMA短期 < 長期")
-    if last["close"] < last["Lower"]: buy += 1; logs.append("🟢 BB下限反発の可能性")
-    elif last["close"] > last["Upper"]: sell += 1; logs.append("🔴 BB上限反発の可能性")
-    else: logs.append("⚪ BB反発無し")
-    if last["RCI"] > 0.5: buy += 1; logs.append("🟢 RCI上昇傾向")
-    elif last["RCI"] < -0.5: sell += 1; logs.append("🔴 RCI下降傾向")
-    else: logs.append("⚪ RCI未達")
-    hi_sig, lo_sig = detect_dow_theory(df)
-    if hi_sig >= 2: buy += 1; logs.append("🟢 高値切り上げ")
-    elif lo_sig >= 2: sell += 1; logs.append("🔴 安値切り下げ")
-    else: logs.append("⚪ ダウ理論未達")
-    pa = detect_price_action(df)
-    if pa == "bullish_engulfing": buy += 1; logs.append("🟢 陽線包み足")
-    elif pa == "bearish_engulfing": sell += 1; logs.append("🔴 陰線包み足")
-    else: logs.append("⚪ プライスアクション未達")
+
+    # トレンド時はMACD・SMAに重み
+    # レンジ時はBB・RCIに重み
+    trend_weight = 2 if market == "トレンド" else 1
+    range_weight = 2 if market == "レンジ" else 1
+
+    if last["MACD"] > last["Signal"]:
+        buy += trend_weight
+        logs.append("🟢 MACDゴールデンクロス")
+    else:
+        sell += trend_weight
+        logs.append("🔴 MACDデッドクロス")
+
+    if last["SMA_5"] > last["SMA_20"]:
+        buy += trend_weight
+        logs.append("🟢 SMA短期 > 長期")
+    else:
+        sell += trend_weight
+        logs.append("🔴 SMA短期 < 長期")
+
+    if last["close"] < last["Lower"]:
+        buy += range_weight
+        logs.append("🟢 BB下限反発の可能性")
+    elif last["close"] > last["Upper"]:
+        sell += range_weight
+        logs.append("🔴 BB上限反発の可能性")
+    else:
+        logs.append("⚪ BB反発無し")
+
+    if last["RCI"] > 0.5:
+        buy += range_weight
+        logs.append("🟢 RCI上昇傾向")
+    elif last["RCI"] < -0.5:
+        sell += range_weight
+        logs.append("🔴 RCI下降傾向")
+    else:
+        logs.append("⚪ RCI未達")
+
     return ("買い" if buy >= 4 and buy > sell else
             "売り" if sell >= 4 and sell > buy else
             "待ち"), logs, buy, sell
 
-# --- 高値・安値取得 ---
-def get_recent_high_low(df, direction):
+# --- トレードプラン（エントリー価格・TP/SL） ---
+def suggest_trade_plan(price, atr, decision, tf, df):
     hi = df["high"].rolling(20).max().iloc[-2]
     lo = df["low"].rolling(20).min().iloc[-2]
-    return (hi, lo) if direction == "買い" else (lo, hi)
-
-# --- トレードプラン ---
-def suggest_trade_plan(price, atr, decision, tf, df):
-    rr_comment = "（ATR）"
-    if style == "スイング" and tf == "1day":
-        hi, lo = get_recent_high_low(df, decision)
-        tp = hi * 0.997 if decision == "買い" else lo * 0.997
-        sl = lo * 1.003 if decision == "買い" else hi * 1.003
-        rr_comment = "（高値/安値）"
-    elif style == "デイトレード" and tf == "4h":
-        hi, lo = get_recent_high_low(df, decision)
-        tp = hi * 0.997 if decision == "買い" else lo * 0.997
-        sl = lo * 1.003 if decision == "買い" else hi * 1.003
-        rr_comment = "（高値/安値）"
+    if decision == "買い":
+        tp = hi * 0.997
+        sl = lo * 1.003
     else:
-        tp = price + atr * 1.6 if decision == "買い" else price - atr * 1.6
-        sl = price - atr * 1.0 if decision == "買い" else price + atr * 1.0
+        tp = lo * 0.997
+        sl = hi * 1.003
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
-    return price, tp, sl, rr, pips_tp, pips_sl, rr_comment
+    return price, tp, sl, rr, pips_tp, pips_sl
 
-# --- 実行 ---
+# --- 実行ボタン ---
 if st.button("実行"):
     timeframes = tf_map[style]
     total_buy_score = total_sell_score = 0
     score_log = []
     main_df = None
     main_tf = ""
+
     st.subheader(f"📊 通貨ペア：{symbol} | スタイル：{style}")
     st.markdown("### ⏱ 各時間足シグナル詳細\n\n凡例：🟢=買い、🔴=売り、⚪=未達")
+
     for tf in timeframes:
-        df = fetch_data(symbol, tf)
-        if df is None:
+        try:
+            df = fetch_data(symbol, tf)
+            df = calc_indicators(df)
+        except Exception as e:
+            st.error(f"{tf} のデータ取得に失敗: {e}")
             continue
-        df = calc_indicators(df)
+
         sig, logs, b, s = extract_signal(df)
         weight = tf_weights[tf]
         total_buy_score += b * weight
@@ -174,27 +168,34 @@ if st.button("実行"):
         main_tf = tf
 
     st.markdown("⸻\n### 🧭 エントリーガイド（総合評価）")
+    if total_buy_score >= 2.4 and total_buy_score > total_sell_score:
+        decision = "買い"
+    elif total_sell_score >= 2.4 and total_sell_score > total_buy_score:
+        decision = "売り"
+    elif abs(total_buy_score - total_sell_score) >= 1.0:
+        decision = "買い" if total_buy_score > total_sell_score else "売り"
+    else:
+        decision = "待ち"
+
     st.markdown(f"総合スコア：{total_buy_score:.2f}（買） / {total_sell_score:.2f}（売）")
     for tf, b, s, w in score_log:
         st.markdown(f"　• {tf}：買 {b} × {w} = {b*w:.2f} / 売 {s} × {w} = {s*w:.2f}")
-    if total_buy_score >= 2.4 and total_buy_score > total_sell_score:
-        decision = "買い"
+
+    if decision == "買い":
         st.success("✅ 買いシグナル")
-    elif total_sell_score >= 2.4 and total_sell_score > total_buy_score:
-        decision = "売り"
+    elif decision == "売り":
         st.warning("✅ 売りシグナル")
     else:
-        decision = "待ち"
         st.info("⏸ エントリー見送り")
 
     st.markdown("⸻\n### 🎯 トレードプラン（想定）")
-    if main_df is not None and decision != "待ち":
+    if decision != "待ち":
         price = main_df["close"].iloc[-1]
         atr = main_df["close"].rolling(14).std().iloc[-1]
-        entry, tp, sl, rr, ptp, psl, comment = suggest_trade_plan(price, atr, decision, main_tf, main_df)
+        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, decision, main_tf, main_df)
         st.markdown(f"• エントリー価格：{entry:.5f}")
         st.markdown(f"• TP：{tp:.5f}（+{ptp:.0f}pips）")
         st.markdown(f"• SL：{sl:.5f}（−{psl:.0f}pips）")
-        st.markdown(f"• リスクリワード：{rr:.2f} {comment}")
-    elif decision == "待ち":
-        st.markdown("現在はエントリー待機中です。")
+        st.markdown(f"• リスクリワード：{rr:.2f}（高値/安値）")
+    else:
+        st.markdown("現在はエントリー見送りです。")
