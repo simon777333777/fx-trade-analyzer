@@ -109,12 +109,10 @@ def extract_signal(df):
     if last["RCI"] > 0.5: buy += 1; logs.append("🟢 RCI上昇傾向")
     elif last["RCI"] < -0.5: sell += 1; logs.append("🔴 RCI下降傾向")
     else: logs.append("⚪ RCI未達")
-    # ダウ理論
     hi_sig, lo_sig = detect_dow_theory(df)
     if hi_sig >= 2: buy += 1; logs.append("🟢 高値切り上げ")
     elif lo_sig >= 2: sell += 1; logs.append("🔴 安値切り下げ")
     else: logs.append("⚪ ダウ理論未達")
-    # プライスアクション
     pa = detect_price_action(df)
     if pa == "bullish_engulfing": buy += 1; logs.append("🟢 陽線包み足")
     elif pa == "bearish_engulfing": sell += 1; logs.append("🔴 陰線包み足")
@@ -123,11 +121,40 @@ def extract_signal(df):
             "売り" if sell >= 4 and sell > buy else
             "待ち"), logs, buy, sell
 
+# --- 高値・安値取得 ---
+def get_recent_high_low(df, direction):
+    hi = df["high"].rolling(20).max().iloc[-2]
+    lo = df["low"].rolling(20).min().iloc[-2]
+    return (hi, lo) if direction == "買い" else (lo, hi)
+
+# --- トレードプラン ---
+def suggest_trade_plan(price, atr, decision, tf, df):
+    rr_comment = "（ATR）"
+    if style == "スイング" and tf == "1day":
+        hi, lo = get_recent_high_low(df, decision)
+        tp = hi * 0.997 if decision == "買い" else lo * 0.997
+        sl = lo * 1.003 if decision == "買い" else hi * 1.003
+        rr_comment = "（高値/安値）"
+    elif style == "デイトレード" and tf == "4h":
+        hi, lo = get_recent_high_low(df, decision)
+        tp = hi * 0.997 if decision == "買い" else lo * 0.997
+        sl = lo * 1.003 if decision == "買い" else hi * 1.003
+        rr_comment = "（高値/安値）"
+    else:
+        tp = price + atr * 1.6 if decision == "買い" else price - atr * 1.6
+        sl = price - atr * 1.0 if decision == "買い" else price + atr * 1.0
+    rr = abs((tp - price) / (sl - price)) if sl != price else 0
+    pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
+    pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
+    return price, tp, sl, rr, pips_tp, pips_sl, rr_comment
+
 # --- 実行 ---
 if st.button("実行"):
     timeframes = tf_map[style]
     total_buy_score = total_sell_score = 0
     score_log = []
+    main_df = None
+    main_tf = ""
     st.subheader(f"📊 通貨ペア：{symbol} | スタイル：{style}")
     st.markdown("### ⏱ 各時間足シグナル詳細\n\n凡例：🟢=買い、🔴=売り、⚪=未達")
     for tf in timeframes:
@@ -143,13 +170,31 @@ if st.button("実行"):
         st.markdown(f"⏱ {tf} 判定：{sig}（スコア：{max(b,s):.1f}）")
         for log in logs:
             st.markdown(log)
+        main_df = df
+        main_tf = tf
+
     st.markdown("⸻\n### 🧭 エントリーガイド（総合評価）")
     st.markdown(f"総合スコア：{total_buy_score:.2f}（買） / {total_sell_score:.2f}（売）")
     for tf, b, s, w in score_log:
         st.markdown(f"　• {tf}：買 {b} × {w} = {b*w:.2f} / 売 {s} × {w} = {s*w:.2f}")
     if total_buy_score >= 2.4 and total_buy_score > total_sell_score:
+        decision = "買い"
         st.success("✅ 買いシグナル")
     elif total_sell_score >= 2.4 and total_sell_score > total_buy_score:
+        decision = "売り"
         st.warning("✅ 売りシグナル")
     else:
+        decision = "待ち"
         st.info("⏸ エントリー見送り")
+
+    st.markdown("⸻\n### 🎯 トレードプラン（想定）")
+    if main_df is not None and decision != "待ち":
+        price = main_df["close"].iloc[-1]
+        atr = main_df["close"].rolling(14).std().iloc[-1]
+        entry, tp, sl, rr, ptp, psl, comment = suggest_trade_plan(price, atr, decision, main_tf, main_df)
+        st.markdown(f"• エントリー価格：{entry:.5f}")
+        st.markdown(f"• TP：{tp:.5f}（+{ptp:.0f}pips）")
+        st.markdown(f"• SL：{sl:.5f}（−{psl:.0f}pips）")
+        st.markdown(f"• リスクリワード：{rr:.2f} {comment}")
+    elif decision == "待ち":
+        st.markdown("現在はエントリー待機中です。")
