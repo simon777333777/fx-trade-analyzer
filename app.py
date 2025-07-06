@@ -50,8 +50,12 @@ def fetch_data(symbol, interval):
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
     df.set_index("datetime", inplace=True)
-    numeric_cols = ["open", "high", "low", "close", "volume"]
-    df[numeric_cols] = df[numeric_cols].astype(float)
+
+    # 存在するカラムのみ float に変換
+    expected_cols = ["open", "high", "low", "close", "volume"]
+    existing_cols = [col for col in expected_cols if col in df.columns]
+    df[existing_cols] = df[existing_cols].astype(float)
+
     return df
 
 # --- インジケータ算出 ---
