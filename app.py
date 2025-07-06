@@ -41,7 +41,8 @@ def fetch_data(symbol, interval):
     if use_dummy:
         return get_dummy_data()
 
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
+    symbol_api = symbol.replace("/", "")  # 'USD/JPY' → 'USDJPY'
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol_api}&interval={interval}&outputsize=500&apikey={API_KEY}"
     r = requests.get(url)
     data = r.json()
     if "values" not in data:
@@ -74,25 +75,28 @@ def detect_market_structure(last):
     if last["STD"] > last["close"] * 0.005: trend += 1
     return "トレンド" if trend >= 2 else "レンジ"
 
-# --- シグナル抽出（重み調整付き） ---
+# --- シグナル抽出（重み調整＋ダウ理論・プライスアクション対応） ---
 def extract_signal(df):
     last = df.iloc[-1]
+    prev = df.iloc[-2]
     market = detect_market_structure(last)
     logs = [f"• 市場判定：{market}"]
     buy = sell = 0
 
-    # トレンド時はMACD・SMAに重み
-    # レンジ時はBB・RCIに重み
     trend_weight = 2 if market == "トレンド" else 1
     range_weight = 2 if market == "レンジ" else 1
 
-    if last["MACD"] > last["Signal"]:
+    # MACD
+    if last["MACD"] > last["Signal"] and prev["MACD"] <= prev["Signal"]:
         buy += trend_weight
         logs.append("🟢 MACDゴールデンクロス")
-    else:
+    elif last["MACD"] < last["Signal"] and prev["MACD"] >= prev["Signal"]:
         sell += trend_weight
         logs.append("🔴 MACDデッドクロス")
+    else:
+        logs.append("⚪ MACD未達")
 
+    # SMA
     if last["SMA_5"] > last["SMA_20"]:
         buy += trend_weight
         logs.append("🟢 SMA短期 > 長期")
@@ -100,6 +104,7 @@ def extract_signal(df):
         sell += trend_weight
         logs.append("🔴 SMA短期 < 長期")
 
+    # BB
     if last["close"] < last["Lower"]:
         buy += range_weight
         logs.append("🟢 BB下限反発の可能性")
@@ -109,6 +114,7 @@ def extract_signal(df):
     else:
         logs.append("⚪ BB反発無し")
 
+    # RCI
     if last["RCI"] > 0.5:
         buy += range_weight
         logs.append("🟢 RCI上昇傾向")
@@ -117,6 +123,26 @@ def extract_signal(df):
         logs.append("🔴 RCI下降傾向")
     else:
         logs.append("⚪ RCI未達")
+
+    # ダウ理論（高値/安値の切り上げ）
+    if df["high"].iloc[-1] > df["high"].iloc[-2] and df["low"].iloc[-1] > df["low"].iloc[-2]:
+        buy += 1
+        logs.append("🟢 高値切り上げ")
+    elif df["high"].iloc[-1] < df["high"].iloc[-2] and df["low"].iloc[-1] < df["low"].iloc[-2]:
+        sell += 1
+        logs.append("🔴 安値切り下げ")
+    else:
+        logs.append("⚪ 高安不明")
+
+    # プライスアクション（包み足）
+    if df["open"].iloc[-1] < df["close"].iloc[-1] and df["open"].iloc[-2] > df["close"].iloc[-2] and df["open"].iloc[-1] < df["close"].iloc[-2] and df["close"].iloc[-1] > df["open"].iloc[-2]:
+        buy += 1
+        logs.append("🟢 陽線包み足")
+    elif df["open"].iloc[-1] > df["close"].iloc[-1] and df["open"].iloc[-2] < df["close"].iloc[-2] and df["open"].iloc[-1] > df["close"].iloc[-2] and df["close"].iloc[-1] < df["open"].iloc[-2]:
+        sell += 1
+        logs.append("🔴 陰線包み足")
+    else:
+        logs.append("⚪ プライスアクション未達")
 
     return ("買い" if buy >= 4 and buy > sell else
             "売り" if sell >= 4 and sell > buy else
