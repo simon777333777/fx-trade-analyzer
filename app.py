@@ -48,9 +48,10 @@ def fetch_data(symbol, interval):
         raise ValueError(f"APIデータ取得エラー: {data}")
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.astype(float)
+    df = df.sort_values("datetime")
     df.set_index("datetime", inplace=True)
-    df = df.sort_index()
+    numeric_cols = ["open", "high", "low", "close", "volume"]
+    df[numeric_cols] = df[numeric_cols].astype(float)
     return df
 
 # --- インジケータ算出 ---
