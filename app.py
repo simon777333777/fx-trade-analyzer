@@ -176,6 +176,7 @@ def extract_signal(df):
             "売り" if sell >= 4 and sell > buy else
             "待ち"), logs, buy, sell
 
+
 # --- トレードプラン（ブレイク補完＋高値/安値ベース） ---
 def suggest_trade_plan(price, atr, decision, df):
     hi = df["high"].iloc[-20:-1].max()
@@ -183,42 +184,49 @@ def suggest_trade_plan(price, atr, decision, df):
     atr_mult = 1.5
     is_breakout = False
 
-    # ブレイク判定＆TP/SL設定
     if decision == "買い":
         if price > hi:
+            # ✅ ブレイクアウト（高値更新）
             tp = price + atr * atr_mult
             sl = price - atr * atr_mult
             is_breakout = True
         else:
+            # ✅ 高値未更新：高値ちょい下をTP、SLはその半分pips下
             tp = hi * 0.997
-            sl = lo * 1.003
+            tp_diff = tp - price
+            sl = price - abs(tp_diff) / 2
+
     elif decision == "売り":
         if price < lo:
+            # ✅ ブレイクアウト（安値更新）
             tp = price - atr * atr_mult
             sl = price + atr * atr_mult
             is_breakout = True
         else:
+            # ✅ 安値未更新：安値ちょい下をTP、SLはその半分pips上
             tp = lo * 0.997
-            sl = hi * 1.003
-    else:
-        tp = sl = 0  # 念のための初期化
+            tp_diff = price - tp
+            sl = price + abs(tp_diff) / 2
 
-    # リスクリワードとPips計算
+    else:
+        tp = sl = 0  # 念のため初期化
+
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
 
-    # ログ出力
+    # --- ログ出力 ---
     st.markdown("#### 🔍 トレードプラン詳細")
     st.markdown(f"• ATR（14）: `{atr:.5f}`")
     st.markdown(f"• ATR倍率: `{atr_mult}`")
-    st.markdown(f"• 高値/安値ブレイク検出: `{is_breakout}`")
+    st.markdown(f"• 高値/安値更新ブレイク検出: `{is_breakout}`")
     st.markdown(f"• TP値: `{tp:.5f}`")
     st.markdown(f"• SL値: `{sl:.5f}`")
     st.markdown(f"• Pips幅: `TP {pips_tp:.0f} / SL {pips_sl:.0f}`")
     st.markdown(f"• リスクリワード比: `{rr:.2f}`")
 
     return price, tp, sl, rr, pips_tp, pips_sl
+
 
 # --- 実行ボタン ---
 if st.button("実行"):
