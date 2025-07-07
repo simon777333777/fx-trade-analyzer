@@ -73,7 +73,7 @@ def calc_indicators(df):
     df["STD"] = df["close"].rolling(20).std()
     return df
 
-# --- 市場構造判定（トレンド or レンジ） ---
+# --- 市場構造判定 ---
 def detect_market_structure(last):
     trend = 0
     if last["ADX"] > 25: trend += 1
@@ -81,7 +81,7 @@ def detect_market_structure(last):
     if last["STD"] > last["close"] * 0.005: trend += 1
     return "トレンド" if trend >= 2 else "レンジ"
 
-# --- ダウ理論（高値/安値の切り上げ・切り下げ） ---
+# --- ダウ理論判定 ---
 def detect_dow(df):
     highs = df["high"].iloc[-3:]
     lows = df["low"].iloc[-3:]
@@ -96,7 +96,7 @@ def detect_dow(df):
     else:
         return "不明", "⚪ ダウ理論未達"
 
-# --- プライスアクション判定（包み足） ---
+# --- プライスアクション（包み足） ---
 def detect_price_action(df):
     last2 = df.iloc[-2]
     last1 = df.iloc[-1]
@@ -117,7 +117,6 @@ def extract_signal(df):
     trend_weight = 2 if market == "トレンド" else 1
     range_weight = 2 if market == "レンジ" else 1
 
-    # MACD傾向
     macd_trend = df["MACD"].iloc[-3:]
     signal_trend = df["Signal"].iloc[-3:]
     if macd_trend.iloc[-1] > signal_trend.iloc[-1] and macd_trend.is_monotonic_increasing:
@@ -129,7 +128,6 @@ def extract_signal(df):
     else:
         logs.append("⚪ MACD判定微妙")
 
-    # SMA傾向
     sma5 = df["SMA_5"].iloc[-3:]
     sma20 = df["SMA_20"].iloc[-3:]
     if sma5.iloc[-1] > sma20.iloc[-1] and sma5.is_monotonic_increasing:
@@ -141,7 +139,7 @@ def extract_signal(df):
     else:
         logs.append("⚪ SMA判定微妙")
 
-    # BB
+    last = df.iloc[-1]
     if last["close"] < last["Lower"]:
         buy += range_weight
         logs.append("🟢 BB下限反発の可能性")
@@ -151,7 +149,6 @@ def extract_signal(df):
     else:
         logs.append("⚪ BB反発無し")
 
-    # RCI
     if last["RCI"] > 0.5:
         buy += range_weight
         logs.append("🟢 RCI上昇傾向")
@@ -161,7 +158,6 @@ def extract_signal(df):
     else:
         logs.append("⚪ RCI未達")
 
-    # ダウ理論
     _, log_dow = detect_dow(df)
     if "高値" in log_dow:
         buy += 1
@@ -169,7 +165,6 @@ def extract_signal(df):
         sell += 1
     logs.append(log_dow)
 
-    # プライスアクション
     log_pa = detect_price_action(df)
     if "陽線" in log_pa:
         buy += 1
@@ -181,30 +176,44 @@ def extract_signal(df):
             "売り" if sell >= 4 and sell > buy else
             "待ち"), logs, buy, sell
 
-# --- トレードプラン ---
-def suggest_trade_plan(price, atr, decision, tf, df):
-    atr_mult = 1.5  # ATR倍率でTP/SLを設定
-    if decision == "買い":
+# --- トレードプラン（トレンド補正対応） ---
+def suggest_trade_plan(price, atr, decision, df):
+    hi = df["high"].iloc[-20:-1].max()
+    lo = df["low"].iloc[-20:-1].min()
+    atr_mult = 1.5
+    is_breakout = False
+
+    if decision == "買い" and price > hi:
         tp = price + atr * atr_mult
         sl = price - atr * atr_mult
-    else:
+        is_breakout = True
+    elif decision == "売り" and price < lo:
         tp = price - atr * atr_mult
         sl = price + atr * atr_mult
+        is_breakout = True
+    else:
+        if decision == "買い":
+            tp = hi * 0.997
+            sl = lo * 1.003
+        else:
+            tp = lo * 0.997
+            sl = hi * 1.003
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
 
-    # ログ出力
     st.markdown("#### 🔍 トレードプラン詳細")
     st.markdown(f"• ATR（14）: `{atr:.5f}`")
     st.markdown(f"• ATR倍率: `{atr_mult}`")
+    st.markdown(f"• 高値更新ブレイク検出: `{is_breakout}`")
     st.markdown(f"• TP値: `{tp:.5f}`")
     st.markdown(f"• SL値: `{sl:.5f}`")
     st.markdown(f"• Pips幅: `TP {pips_tp:.0f} / SL {pips_sl:.0f}`")
     st.markdown(f"• リスクリワード比: `{rr:.2f}`")
 
     return price, tp, sl, rr, pips_tp, pips_sl
+
 # --- 実行ボタン ---
 if st.button("実行"):
     timeframes = tf_map[style]
@@ -260,7 +269,7 @@ if st.button("実行"):
     if decision != "待ち":
         price = main_df["close"].iloc[-1]
         atr = main_df["close"].rolling(14).std().iloc[-1]
-        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, decision, main_tf, main_df)
+        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, decision, main_df)
         st.markdown(f"• エントリー価格：{entry:.5f}")
         st.markdown(f"• TP：{tp:.5f}（+{ptp:.0f}pips）")
         st.markdown(f"• SL：{sl:.5f}（−{psl:.0f}pips）")
