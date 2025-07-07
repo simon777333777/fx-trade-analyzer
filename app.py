@@ -45,28 +45,22 @@ def get_dummy_data():
 def fetch_data(symbol, interval, use_dummy):
     if use_dummy:
         return get_dummy_data()
-
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
     r = requests.get(url)
     data = r.json()
-
     if "values" not in data:
         raise ValueError(f"APIデータ取得エラー: {data}")
-
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df.set_index("datetime", inplace=True)
     df = df.sort_index()
-
     if "volume" not in df.columns:
         df["volume"] = 1000
-
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
     return df
 
-# --- インジケータ ---
+# --- インジケータ計算 ---
 def calc_indicators(df):
     df["SMA_5"] = df["close"].rolling(5).mean()
     df["SMA_20"] = df["close"].rolling(20).mean()
@@ -87,6 +81,32 @@ def detect_market_structure(last):
     if last["STD"] > last["close"] * 0.005: trend += 1
     return "トレンド" if trend >= 2 else "レンジ"
 
+# --- ダウ理論（高値/安値の切り上げ・切り下げ） ---
+def detect_dow(df):
+    highs = df["high"].iloc[-3:]
+    lows = df["low"].iloc[-3:]
+    is_hh = highs[2] > highs[1] > highs[0]
+    is_ll = lows[2] < lows[1] < lows[0]
+    if is_hh and is_ll:
+        return "保ち合い", "⚪ ダウ理論：保ち合い"
+    elif is_hh:
+        return "上昇", "🟢 高値切り上げ"
+    elif is_ll:
+        return "下降", "🔴 安値切り下げ"
+    else:
+        return "不明", "⚪ ダウ理論未達"
+
+# --- プライスアクション判定（包み足） ---
+def detect_price_action(df):
+    last2 = df.iloc[-2]
+    last1 = df.iloc[-1]
+    if last2["close"] < last2["open"] and last1["close"] > last1["open"] and last1["close"] > last2["open"] and last1["open"] < last2["close"]:
+        return "🟢 陽線包み足"
+    elif last2["close"] > last2["open"] and last1["close"] < last1["open"] and last1["close"] < last2["open"] and last1["open"] > last2["close"]:
+        return "🔴 陰線包み足"
+    else:
+        return "⚪ プライスアクション未達"
+
 # --- シグナル抽出 ---
 def extract_signal(df):
     last = df.iloc[-1]
@@ -97,20 +117,31 @@ def extract_signal(df):
     trend_weight = 2 if market == "トレンド" else 1
     range_weight = 2 if market == "レンジ" else 1
 
-    if last["MACD"] > last["Signal"]:
+    # MACD傾向
+    macd_trend = df["MACD"].iloc[-3:]
+    signal_trend = df["Signal"].iloc[-3:]
+    if macd_trend.iloc[-1] > signal_trend.iloc[-1] and macd_trend.is_monotonic_increasing:
         buy += trend_weight
-        logs.append("🟢 MACDゴールデンクロス")
-    else:
+        logs.append("🟢 MACDゴールデンクロス + 上昇傾向")
+    elif macd_trend.iloc[-1] < signal_trend.iloc[-1] and macd_trend.is_monotonic_decreasing:
         sell += trend_weight
-        logs.append("🔴 MACDデッドクロス")
+        logs.append("🔴 MACDデッドクロス + 下降傾向")
+    else:
+        logs.append("⚪ MACD判定微妙")
 
-    if last["SMA_5"] > last["SMA_20"]:
+    # SMA傾向
+    sma5 = df["SMA_5"].iloc[-3:]
+    sma20 = df["SMA_20"].iloc[-3:]
+    if sma5.iloc[-1] > sma20.iloc[-1] and sma5.is_monotonic_increasing:
         buy += trend_weight
-        logs.append("🟢 SMA短期 > 長期")
-    else:
+        logs.append("🟢 SMA短期 > 長期 + 上昇傾向")
+    elif sma5.iloc[-1] < sma20.iloc[-1] and sma5.is_monotonic_decreasing:
         sell += trend_weight
-        logs.append("🔴 SMA短期 < 長期")
+        logs.append("🔴 SMA短期 < 長期 + 下降傾向")
+    else:
+        logs.append("⚪ SMA判定微妙")
 
+    # BB
     if last["close"] < last["Lower"]:
         buy += range_weight
         logs.append("🟢 BB下限反発の可能性")
@@ -120,6 +151,7 @@ def extract_signal(df):
     else:
         logs.append("⚪ BB反発無し")
 
+    # RCI
     if last["RCI"] > 0.5:
         buy += range_weight
         logs.append("🟢 RCI上昇傾向")
@@ -128,6 +160,22 @@ def extract_signal(df):
         logs.append("🔴 RCI下降傾向")
     else:
         logs.append("⚪ RCI未達")
+
+    # ダウ理論
+    _, log_dow = detect_dow(df)
+    if "高値" in log_dow:
+        buy += 1
+    elif "安値" in log_dow:
+        sell += 1
+    logs.append(log_dow)
+
+    # プライスアクション
+    log_pa = detect_price_action(df)
+    if "陽線" in log_pa:
+        buy += 1
+    elif "陰線" in log_pa:
+        sell += 1
+    logs.append(log_pa)
 
     return ("買い" if buy >= 4 and buy > sell else
             "売り" if sell >= 4 and sell > buy else
