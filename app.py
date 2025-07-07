@@ -176,37 +176,43 @@ def extract_signal(df):
             "売り" if sell >= 4 and sell > buy else
             "待ち"), logs, buy, sell
 
-# --- トレードプラン（トレンド補正対応） ---
+# --- トレードプラン（ブレイク補完＋高値/安値ベース） ---
 def suggest_trade_plan(price, atr, decision, df):
     hi = df["high"].iloc[-20:-1].max()
     lo = df["low"].iloc[-20:-1].min()
     atr_mult = 1.5
     is_breakout = False
 
-    if decision == "買い" and price > hi:
-        tp = price + atr * atr_mult
-        sl = price - atr * atr_mult
-        is_breakout = True
-    elif decision == "売り" and price < lo:
-        tp = price - atr * atr_mult
-        sl = price + atr * atr_mult
-        is_breakout = True
-    else:
-        if decision == "買い":
+    # ブレイク判定＆TP/SL設定
+    if decision == "買い":
+        if price > hi:
+            tp = price + atr * atr_mult
+            sl = price - atr * atr_mult
+            is_breakout = True
+        else:
             tp = hi * 0.997
             sl = lo * 1.003
+    elif decision == "売り":
+        if price < lo:
+            tp = price - atr * atr_mult
+            sl = price + atr * atr_mult
+            is_breakout = True
         else:
             tp = lo * 0.997
             sl = hi * 1.003
+    else:
+        tp = sl = 0  # 念のための初期化
 
+    # リスクリワードとPips計算
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
 
+    # ログ出力
     st.markdown("#### 🔍 トレードプラン詳細")
     st.markdown(f"• ATR（14）: `{atr:.5f}`")
     st.markdown(f"• ATR倍率: `{atr_mult}`")
-    st.markdown(f"• 高値更新ブレイク検出: `{is_breakout}`")
+    st.markdown(f"• 高値/安値ブレイク検出: `{is_breakout}`")
     st.markdown(f"• TP値: `{tp:.5f}`")
     st.markdown(f"• SL値: `{sl:.5f}`")
     st.markdown(f"• Pips幅: `TP {pips_tp:.0f} / SL {pips_sl:.0f}`")
