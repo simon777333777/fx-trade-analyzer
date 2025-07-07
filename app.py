@@ -176,40 +176,50 @@ def extract_signal(df):
             "売り" if sell >= 4 and sell > buy else
             "待ち"), logs, buy, sell
 
+# --- 高値・安値取得（スタイルごと） ---
+def get_hi_lo(df, style):
+    if style == "スキャルピング":
+        hi = df["high"].iloc[-12:].max()  # 5min × 12本 = 約1時間
+        lo = df["low"].iloc[-12:].min()
+    elif style == "デイトレード":
+        hi = df["high"].iloc[-20:].max()  # 1h × 20本 = 約1日
+        lo = df["low"].iloc[-20:].min()
+    elif style == "スイング":
+        hi = df["high"].iloc[-10:].max()  # 4h × 10本 = 約2日
+        lo = df["low"].iloc[-10:].min()
+    else:
+        hi = df["high"].max()
+        lo = df["low"].min()
+    return hi, lo
 
-# --- トレードプラン（ブレイク補完＋高値/安値ベース） ---
-def suggest_trade_plan(price, atr, decision, df):
-    hi = df["high"].iloc[-20:-1].max()
-    lo = df["low"].iloc[-20:-1].min()
+# --- トレードプラン（修正済：hi/loスタイル対応 & RR制限なし） ---
+def suggest_trade_plan(price, atr, decision, df, style):
+    hi, lo = get_hi_lo(df, style)
     atr_mult = 1.5
     is_breakout = False
 
     if decision == "買い":
         if price > hi:
-            # ✅ ブレイクアウト（高値更新）
             tp = price + atr * atr_mult
             sl = price - atr * atr_mult
             is_breakout = True
         else:
-            # ✅ 高値未更新：高値ちょい下をTP、SLはその半分pips下
             tp = hi * 0.997
             tp_diff = tp - price
             sl = price - abs(tp_diff) / 2
 
     elif decision == "売り":
         if price < lo:
-            # ✅ ブレイクアウト（安値更新）
             tp = price - atr * atr_mult
             sl = price + atr * atr_mult
             is_breakout = True
         else:
-            # ✅ 安値未更新：安値ちょい下をTP、SLはその半分pips上
             tp = lo * 0.997
             tp_diff = price - tp
             sl = price + abs(tp_diff) / 2
 
     else:
-        tp = sl = 0  # 念のため初期化
+        tp = sl = 0
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
@@ -227,8 +237,7 @@ def suggest_trade_plan(price, atr, decision, df):
 
     return price, tp, sl, rr, pips_tp, pips_sl
 
-
-# --- 実行ボタン ---
+# --- 実行部（トレードプラン呼び出し変更あり） ---
 if st.button("実行"):
     timeframes = tf_map[style]
     total_buy_score = total_sell_score = 0
@@ -283,7 +292,7 @@ if st.button("実行"):
     if decision != "待ち":
         price = main_df["close"].iloc[-1]
         atr = main_df["close"].rolling(14).std().iloc[-1]
-        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, decision, main_df)
+        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, decision, main_df, style)
         st.markdown(f"• エントリー価格：{entry:.5f}")
         st.markdown(f"• TP：{tp:.5f}（+{ptp:.0f}pips）")
         st.markdown(f"• SL：{sl:.5f}（−{psl:.0f}pips）")
