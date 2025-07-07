@@ -216,7 +216,7 @@ def suggest_trade_plan(price, atr, decision, df, style):
         else:
             tp = lo * 0.997
             tp_diff = price - tp
-            sl = price + abs(tp_diff) / 2
+            sl = price + abs(tp_diff) / 1.7
 
     else:
         tp = sl = 0
