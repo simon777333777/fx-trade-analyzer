@@ -183,19 +183,28 @@ def extract_signal(df):
 
 # --- トレードプラン ---
 def suggest_trade_plan(price, atr, decision, tf, df):
-    hi = df["high"].rolling(20).max().iloc[-2]
-    lo = df["low"].rolling(20).min().iloc[-2]
+    atr_mult = 1.5  # ATR倍率でTP/SLを設定
     if decision == "買い":
-        tp = hi * 0.997
-        sl = lo * 1.003
+        tp = price + atr * atr_mult
+        sl = price - atr * atr_mult
     else:
-        tp = lo * 0.997
-        sl = hi * 1.003
+        tp = price - atr * atr_mult
+        sl = price + atr * atr_mult
+
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
-    return price, tp, sl, rr, pips_tp, pips_sl
 
+    # ログ出力
+    st.markdown("#### 🔍 トレードプラン詳細")
+    st.markdown(f"• ATR（14）: `{atr:.5f}`")
+    st.markdown(f"• ATR倍率: `{atr_mult}`")
+    st.markdown(f"• TP値: `{tp:.5f}`")
+    st.markdown(f"• SL値: `{sl:.5f}`")
+    st.markdown(f"• Pips幅: `TP {pips_tp:.0f} / SL {pips_sl:.0f}`")
+    st.markdown(f"• リスクリワード比: `{rr:.2f}`")
+
+    return price, tp, sl, rr, pips_tp, pips_sl
 # --- 実行ボタン ---
 if st.button("実行"):
     timeframes = tf_map[style]
