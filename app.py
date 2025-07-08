@@ -6,15 +6,18 @@ import requests
 st.set_page_config(page_title="FXトレード分析", layout="centered")
 API_KEY = st.secrets["API_KEY"]
 
+# --- キャッシュクリアボタン ---
 if st.button("🧹 キャッシュをクリア"):
     st.cache_data.clear()
     st.success("キャッシュをクリアしました。")
 
+# --- UI ---
 st.title("FXトレード分析ツール")
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
 style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=2)
 use_dummy = st.checkbox("📦 ダミーデータで実行", value=False)
 
+# --- 時間足マッピングと重み付け ---
 tf_map = {
     "スキャルピング": ["5min", "15min", "1h"],
     "デイトレード": ["15min", "1h", "4h"],
@@ -22,6 +25,7 @@ tf_map = {
 }
 tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
 
+# --- ダミーデータ生成 ---
 def get_dummy_data():
     idx = pd.date_range(end=pd.Timestamp.now(), periods=150, freq="H")
     np.random.seed(0)
@@ -35,6 +39,7 @@ def get_dummy_data():
         "volume": 1000
     }).set_index("datetime")
 
+# --- APIデータ取得 ---
 @st.cache_data(ttl=300)
 def fetch_data(symbol, interval, use_dummy):
     if use_dummy:
@@ -54,6 +59,7 @@ def fetch_data(symbol, interval, use_dummy):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
+# --- インジケーター計算 ---
 def calc_indicators(df):
     df["SMA_5"] = df["close"].rolling(5).mean()
     df["SMA_20"] = df["close"].rolling(20).mean()
@@ -66,6 +72,7 @@ def calc_indicators(df):
     df["STD"] = df["close"].rolling(20).std()
     return df
 
+# --- 市場構造判定 ---
 def detect_market_structure(last):
     trend = 0
     if last["ADX"] > 25: trend += 1
@@ -73,6 +80,7 @@ def detect_market_structure(last):
     if last["STD"] > last["close"] * 0.005: trend += 1
     return "トレンド" if trend >= 2 else "レンジ"
 
+# --- ダウ理論判定 ---
 def detect_dow(df):
     highs = df["high"].iloc[-3:]
     lows = df["low"].iloc[-3:]
@@ -87,6 +95,7 @@ def detect_dow(df):
     else:
         return "不明", "⚪ ダウ理論未達"
 
+# --- プライスアクション（包み足） ---
 def detect_price_action(df):
     last2 = df.iloc[-2]
     last1 = df.iloc[-1]
@@ -97,6 +106,7 @@ def detect_price_action(df):
     else:
         return "⚪ プライスアクション未達"
 
+# --- シグナル抽出 ---
 def extract_signal(df):
     last = df.iloc[-1]
     market = detect_market_structure(last)
@@ -159,25 +169,30 @@ def extract_signal(df):
         sell += 1
     logs.append(log_pa)
 
-    return ("買い" if buy >= 4 and buy > sell else
-            "売り" if sell >= 4 and sell > buy else
-            "待ち"), logs, buy, sell
+    if buy >= 4 and buy > sell:
+        return "買い", logs, buy, sell
+    elif sell >= 4 and sell > buy:
+        return "売り", logs, buy, sell
+    else:
+        return "待ち", logs, buy, sell
 
+# --- 高値・安値取得（トレードスタイルごと） ---
 def get_hi_lo(df, style):
     if style == "スキャルピング":
-        hi = df["high"].iloc[-12:].max()
+        hi = df["high"].iloc[-12:].max()  # 5min × 12本 ≒1時間
         lo = df["low"].iloc[-12:].min()
     elif style == "デイトレード":
-        hi = df["high"].iloc[-20:].max()
+        hi = df["high"].iloc[-20:].max()  # 1h × 20本 ≒1日
         lo = df["low"].iloc[-20:].min()
     elif style == "スイング":
-        hi = df["high"].iloc[-10:].max()
+        hi = df["high"].iloc[-10:].max()  # 4h × 10本 ≒2日
         lo = df["low"].iloc[-10:].min()
     else:
         hi = df["high"].max()
         lo = df["low"].min()
     return hi, lo
 
+# --- トレードプラン（TP/SL計算） ---
 def suggest_trade_plan(price, atr, decision, df, style):
     hi, lo = get_hi_lo(df, style)
     atr_mult = 1.5
@@ -218,16 +233,19 @@ def suggest_trade_plan(price, atr, decision, df, style):
     st.markdown(f"• リスクリワード比: `{rr:.2f}`")
     return price, tp, sl, rr, pips_tp, pips_sl
 
+# --- バックテスト ---
 def run_backtest(df, style):
     results = []
-    for i in range(100, len(df) - 1):
+    for i in range(100, len(df) - 5):
         sub_df = df.iloc[i - 50:i + 1].copy()
         sig, logs, _, _ = extract_signal(sub_df)
         price = sub_df["close"].iloc[-1]
         atr = sub_df["close"].rolling(14).std().iloc[-1]
-        entry, tp, sl, _, _, _ = suggest_trade_plan(price, atr, sig, sub_df, style)
+        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, sig, sub_df, style)
+
         future_high = df["high"].iloc[i + 1:i + 5].max()
         future_low = df["low"].iloc[i + 1:i + 5].min()
+
         hit = None
         if sig == "買い":
             if future_high >= tp:
@@ -239,13 +257,29 @@ def run_backtest(df, style):
                 hit = "win"
             elif future_high >= sl:
                 hit = "lose"
+
         if hit:
-            results.append({"result": hit, "pips": abs(tp - price) * (100 if "JPY" in symbol else 10000)})
-            with st.expander(f"{i}本目シグナル: {sig} → {hit}"):
-                for log in logs:
-                    st.markdown(log)
+            results.append({
+                "index": i,
+                "signal": sig,
+                "result": hit,
+                "pips": abs(tp - price) * (100 if "JPY" in symbol else 10000),
+                "logs": logs
+            })
+
+    # バックテスト結果の表示（折りたたみログと見出し）
+    st.markdown("#### バックテスト詳細ログ")
+    st.markdown("| 本数 | シグナル | 結果 | 獲得pips |")
+    st.markdown("| --- | --- | --- | --- |")
+
+    for r in results:
+        with st.expander(f"{r['index']}本目 | シグナル: {r['signal']} → 結果: {r['result']} | 獲得pips: {r['pips']:.1f}", expanded=False):
+            for log in r["logs"]:
+                st.markdown(log)
+
     return results
 
+# --- 実行部分 ---
 if st.button("実行"):
     timeframes = tf_map[style]
     total_buy_score = total_sell_score = 0
