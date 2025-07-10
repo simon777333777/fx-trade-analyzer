@@ -6,18 +6,15 @@ import requests
 st.set_page_config(page_title="FXトレード分析", layout="centered")
 API_KEY = st.secrets["API_KEY"]
 
-# --- キャッシュクリアボタン ---
 if st.button("🧹 キャッシュをクリア"):
     st.cache_data.clear()
     st.success("キャッシュをクリアしました。")
 
-# --- UI ---
 st.title("FXトレード分析ツール")
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=2)
 style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=2)
 use_dummy = st.checkbox("📦 ダミーデータで実行", value=False)
 
-# --- 時間足マッピングと重み付け ---
 tf_map = {
     "スキャルピング": ["5min", "15min", "1h"],
     "デイトレード": ["15min", "1h", "4h"],
@@ -25,7 +22,6 @@ tf_map = {
 }
 tf_weights = {"5min": 0.2, "15min": 0.3, "1h": 0.3, "4h": 0.3, "1day": 0.4}
 
-# --- ダミーデータ生成 ---
 def get_dummy_data():
     idx = pd.date_range(end=pd.Timestamp.now(), periods=150, freq="H")
     np.random.seed(0)
@@ -39,7 +35,6 @@ def get_dummy_data():
         "volume": 1000
     }).set_index("datetime")
 
-# --- APIデータ取得 ---
 @st.cache_data(ttl=300)
 def fetch_data(symbol, interval, use_dummy):
     if use_dummy:
@@ -48,18 +43,16 @@ def fetch_data(symbol, interval, use_dummy):
     r = requests.get(url)
     data = r.json()
     if "values" not in data:
-        raise ValueError(f"APIデータ取得エラー: {data}")
+        raise ValueError(f"APIエラー: {data}")
     df = pd.DataFrame(data["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df.set_index("datetime", inplace=True)
     df = df.sort_index()
+    df = df.apply(pd.to_numeric, errors="coerce")
     if "volume" not in df.columns:
         df["volume"] = 1000
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-# --- インジケーター計算 ---
 def calc_indicators(df):
     df["SMA_5"] = df["close"].rolling(5).mean()
     df["SMA_20"] = df["close"].rolling(20).mean()
@@ -70,15 +63,22 @@ def calc_indicators(df):
     df["RCI"] = df["close"].rank().rolling(9).apply(lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1])
     df["ADX"] = abs(df["MACD"] - df["Signal"]).rolling(14).mean()
     df["STD"] = df["close"].rolling(20).std()
+    df["HH"] = df["high"].rolling(20).max()
+    df["LL"] = df["low"].rolling(20).min()
     return df
 
-# --- 価格/構造/ダウ理論/PA判定 ---
-def detect_market_structure(last):
-    trend = 0
-    if last["ADX"] > 25: trend += 1
-    if abs(last["SMA_5"] - last["SMA_20"]) / last["close"] > 0.015: trend += 1
-    if last["STD"] > last["close"] * 0.005: trend += 1
-    return "トレンド" if trend >= 2 else "レンジ"
+def detect_market_structure(df):
+    last = df.iloc[-1]
+    trend_score = 0
+    if last["ADX"] > 25:
+        trend_score += 1
+    if abs(last["SMA_5"] - last["SMA_20"]) / last["close"] > 0.015:
+        trend_score += 1
+    if last["close"] > df["HH"].iloc[-1] * 0.995:
+        trend_score += 1
+    if last["close"] < df["LL"].iloc[-1] * 1.005:
+        trend_score += 1
+    return "トレンド" if trend_score >= 2 else "レンジ"
 
 def detect_dow(df):
     highs = df["high"].iloc[-3:]
@@ -105,51 +105,62 @@ def detect_price_action(df):
 
 def extract_signal(df):
     last = df.iloc[-1]
-    market = detect_market_structure(last)
+    market = detect_market_structure(df)
     logs = [f"• 市場判定：{market}"]
     buy = sell = 0
     tw = 2 if market == "トレンド" else 1
     rw = 2 if market == "レンジ" else 1
 
+    # --- MACD ---
     macd = df["MACD"].iloc[-3:]
     sig = df["Signal"].iloc[-3:]
-    if macd.iloc[-1] > sig.iloc[-1] and macd.is_monotonic_increasing:
-        buy += tw; logs.append("🟢 MACDゴールデンクロス + 上昇傾向")
-    elif macd.iloc[-1] < sig.iloc[-1] and macd.is_monotonic_decreasing:
-        sell += tw; logs.append("🔴 MACDデッドクロス + 下降傾向")
+    if macd.iloc[-1] > sig.iloc[-1] and any(macd.diff().iloc[1:] > 0):
+        buy += tw
+        logs.append("🟢 MACDゴールデンクロス傾向")
+    elif macd.iloc[-1] < sig.iloc[-1] and any(macd.diff().iloc[1:] < 0):
+        sell += tw
+        logs.append("🔴 MACDデッドクロス傾向")
     else:
         logs.append("⚪ MACD判定微妙")
 
-    sma5 = df["SMA_5"].iloc[-3:]; sma20 = df["SMA_20"].iloc[-3:]
-    if sma5.iloc[-1] > sma20.iloc[-1] and sma5.is_monotonic_increasing:
-        buy += tw; logs.append("🟢 SMA短期>長期 + 上昇傾向")
-    elif sma5.iloc[-1] < sma20.iloc[-1] and sma5.is_monotonic_decreasing:
-        sell += tw; logs.append("🔴 SMA短期<長期 + 下降傾向")
+    # --- SMA ---
+    sma5 = df["SMA_5"].iloc[-3:]
+    sma20 = df["SMA_20"].iloc[-3:]
+    if sma5.iloc[-1] > sma20.iloc[-1] and any(sma5.diff().iloc[1:] > 0):
+        buy += tw
+        logs.append("🟢 SMA短期>長期")
+    elif sma5.iloc[-1] < sma20.iloc[-1] and any(sma5.diff().iloc[1:] < 0):
+        sell += tw
+        logs.append("🔴 SMA短期<長期")
     else:
         logs.append("⚪ SMA判定微妙")
 
+    # --- BB反発 ---
     if last["close"] < last["Lower"]:
-        buy += rw; logs.append("🟢 BB下限反発")
+        buy += rw
+        logs.append("🟢 BB下限反発")
     elif last["close"] > last["Upper"]:
-        sell += rw; logs.append("🔴 BB上限反発")
+        sell += rw
+        logs.append("🔴 BB上限反発")
     else:
         logs.append("⚪ BB反発無し")
 
-    if last["RCI"] > 0.5:
-        buy += rw; logs.append("🟢 RCI上昇")
-    elif last["RCI"] < -0.5:
-        sell += rw; logs.append("🔴 RCI下降")
+    # --- RCI ---
+    if last["RCI"] > 0.4:
+        buy += rw
+        logs.append("🟢 RCI上昇")
+    elif last["RCI"] < -0.4:
+        sell += rw
+        logs.append("🔴 RCI下降")
     else:
         logs.append("⚪ RCI未達")
 
+    # --- ダウ理論 + PA ---
     _, log_dow = detect_dow(df)
-    buy += "高値" in log_dow
-    sell += "安値" in log_dow
-    logs.append(log_dow)
-
     pa = detect_price_action(df)
-    buy += "陽線" in pa
-    sell += "陰線" in pa
+    buy += "高値" in log_dow or "陽線" in pa
+    sell += "安値" in log_dow or "陰線" in pa
+    logs.append(log_dow)
     logs.append(pa)
 
     if buy >= 4 and buy > sell:
@@ -162,45 +173,47 @@ def extract_signal(df):
 def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     hi = df["high"].iloc[-20:].max()
     lo = df["low"].iloc[-20:].min()
-    atr_mult = 1.5
+    std = df["STD"].iloc[-1]
+    tp = sl = rr = pips_tp = pips_sl = 0
+    atr_mult = 1.2
     is_break = False
-
-    tp = sl = rr = pips_tp = pips_sl = 0  # 初期化
 
     if decision == "買い":
         if price > hi:
-            tp = price + atr * atr_mult
-            sl = price - atr * atr_mult
+            tp = price + std * 2
+            sl = price - std * 1.2
             is_break = True
         else:
             tp = hi * 0.997
             sl = price - abs(tp - price) / 1.7
 
         if not (sl < price < tp):
-            return price, 0, 0, 0, 0, 0  # 整合性NG時、スキップ
+            return price, 0, 0, 0, 0, 0
 
     elif decision == "売り":
         if price < lo:
-            tp = price - atr * atr_mult
-            sl = price + atr * atr_mult
+            tp = price - std * 2
+            sl = price + std * 1.2
             is_break = True
         else:
             tp = lo * 0.997
             sl = price + abs(tp - price) / 1.7
 
         if not (tp < price < sl):
-            return price, 0, 0, 0, 0, 0  # 整合性NG時、スキップ
-
+            return price, 0, 0, 0, 0, 0
     else:
-        return price, 0, 0, 0, 0, 0  # 待ち
+        return price, 0, 0, 0, 0, 0
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
+    if rr < 1.0:
+        return price, 0, 0, 0, 0, 0
+
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
 
     if show_detail:
         st.markdown("#### 🔍 トレードプラン詳細")
-        st.markdown(f"• ATR: `{atr:.5f}`, 倍率: `{atr_mult}`, ブレイク: `{is_break}`")
+        st.markdown(f"• STD: `{std:.5f}`, ATR: `{atr:.5f}`, ブレイク: `{is_break}`")
         st.markdown(f"• TP: `{tp:.5f}` (+{pips_tp:.0f}pips), SL: `{sl:.5f}` (-{pips_sl:.0f}pips)")
         st.markdown(f"• RR比: `{rr:.2f}`")
 
@@ -215,7 +228,6 @@ def run_backtest(df, style):
         atr = sub["close"].rolling(14).std().iloc[-1]
         entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, sig, sub, style, show_detail=False)
 
-        # TP/SLが無効ならスキップ
         if tp == 0 or sl == 0:
             continue
 
@@ -260,12 +272,13 @@ def run_backtest(df, style):
         with st.expander("📋 バックテスト判定ログ（クリックで展開）", expanded=False):
             st.dataframe(df_result)
 
-# --- 実行 ---
 if st.button("実行"):
     st.subheader(f"📌 通貨: {symbol} ｜ スタイル: {style}")
     st.markdown("### ⏱ 各時間足シグナル")
+
     total_buy = total_sell = 0
     main_df = None
+
     for tf in tf_map[style]:
         df = fetch_data(symbol, tf, use_dummy)
         df = calc_indicators(df)
@@ -273,11 +286,14 @@ if st.button("実行"):
         weight = tf_weights[tf]
         total_buy += b * weight
         total_sell += s * weight
+
         st.markdown(f"#### 🕒 {tf} 足: **{sig}**（スコア: {max(b, s):.1f}）")
         for log in logs:
             st.markdown(f"・{log}")
-        if tf == tf_map[style][1]:
+
+        if tf == tf_map[style][1]:  # 中央時間足をメインに使用
             main_df = df.copy()
+
     st.markdown("### 🧭 総合エントリー判断")
     diff = total_buy - total_sell
     if total_buy >= 2.4 and total_buy > total_sell:
@@ -288,13 +304,16 @@ if st.button("実行"):
         decision = "買い" if diff > 0 else "売り"
     else:
         decision = "待ち"
+
     st.markdown(f"• 買いスコア: `{total_buy:.2f}`, 売りスコア: `{total_sell:.2f}`")
     st.success(f"✅ エントリー判定：**{decision}**")
+
     if decision != "待ち" and main_df is not None:
         price = main_df["close"].iloc[-1]
         atr = main_df["close"].rolling(14).std().iloc[-1]
         suggest_trade_plan(price, atr, decision, main_df, style)
     else:
         st.info("📭 明確なエントリーシグナルがないため、トレードプランは表示しません。")
+
     if main_df is not None:
         run_backtest(main_df, style)
