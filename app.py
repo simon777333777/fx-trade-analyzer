@@ -164,6 +164,9 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     lo = df["low"].iloc[-20:].min()
     atr_mult = 1.5
     is_break = False
+
+    tp = sl = rr = pips_tp = pips_sl = 0  # 初期化
+
     if decision == "買い":
         if price > hi:
             tp = price + atr * atr_mult
@@ -172,6 +175,10 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         else:
             tp = hi * 0.997
             sl = price - abs(tp - price) / 1.7
+
+        if not (sl < price < tp):
+            return price, 0, 0, 0, 0, 0  # 整合性NG時、スキップ
+
     elif decision == "売り":
         if price < lo:
             tp = price - atr * atr_mult
@@ -180,16 +187,23 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         else:
             tp = lo * 0.997
             sl = price + abs(tp - price) / 1.7
+
+        if not (tp < price < sl):
+            return price, 0, 0, 0, 0, 0  # 整合性NG時、スキップ
+
     else:
-        return price, 0, 0, 0, 0, 0
+        return price, 0, 0, 0, 0, 0  # 待ち
+
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
+
     if show_detail:
         st.markdown("#### 🔍 トレードプラン詳細")
         st.markdown(f"• ATR: `{atr:.5f}`, 倍率: `{atr_mult}`, ブレイク: `{is_break}`")
         st.markdown(f"• TP: `{tp:.5f}` (+{pips_tp:.0f}pips), SL: `{sl:.5f}` (-{pips_sl:.0f}pips)")
         st.markdown(f"• RR比: `{rr:.2f}`")
+
     return price, tp, sl, rr, pips_tp, pips_sl
 
 def run_backtest(df, style):
@@ -200,6 +214,11 @@ def run_backtest(df, style):
         price = sub["close"].iloc[-1]
         atr = sub["close"].rolling(14).std().iloc[-1]
         entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, sig, sub, style, show_detail=False)
+
+        # TP/SLが無効ならスキップ
+        if tp == 0 or sl == 0:
+            continue
+
         future_high = df["high"].iloc[i + 1:i + 5].max()
         future_low = df["low"].iloc[i + 1:i + 5].min()
         hit = None
@@ -213,6 +232,7 @@ def run_backtest(df, style):
                 hit = "win"
             elif future_high >= sl:
                 hit = "lose"
+
         if sig != "待ち":
             results.append({
                 "No": i,
