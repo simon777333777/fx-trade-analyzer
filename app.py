@@ -108,10 +108,11 @@ def extract_signal(df):
     market = detect_market_structure(df)
     logs = [f"• 市場判定：{market}"]
 
-    # トレンド勢いが弱ければ見送り
-    if last["ADX"] < 15 or last["STD"] < df["close"].mean() * 0.002:
-        logs.append("⚪ ADXまたはSTDが弱いため、見送り")
-        return "待ち", logs, 0, 0
+    # トレンド相場のときのみ、勢い不足で除外
+    if market == "トレンド":
+        if last["ADX"] < 13 and last["STD"] < df["close"].mean() * 0.0015:
+            logs.append("⚪ トレンド勢い不足（ADX<13 かつ STD低）→見送り")
+            return "待ち", logs, 0, 0
 
     buy = sell = 0
     tw = 2 if market == "トレンド" else 1
@@ -161,7 +162,7 @@ def extract_signal(df):
     else:
         logs.append("⚪ RCI未達")
 
-    # --- ダウ理論 + PA ---
+    # --- ダウ理論 + プライスアクション ---
     _, log_dow = detect_dow(df)
     pa = detect_price_action(df)
     if "高値" in log_dow or "陽線" in pa:
@@ -171,10 +172,10 @@ def extract_signal(df):
     logs.append(log_dow)
     logs.append(pa)
 
-    # --- 非対称な売買判定 ---
+    # --- 非対称スコア評価 ---
     if buy >= 4 and buy > sell:
         return "買い", logs, buy, sell
-    elif sell >= 5 and sell > buy:  # 売りは買いより厳しく
+    elif sell >= 5 and sell > buy:  # 売りを厳しく
         return "売り", logs, buy, sell
     else:
         return "待ち", logs, buy, sell
