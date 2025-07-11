@@ -108,15 +108,24 @@ def extract_signal(df):
     market = detect_market_structure(df)
     logs = [f"• 市場判定：{market}"]
 
-    # トレンド相場のときのみ、勢い不足で除外
-    if market == "トレンド":
-        if last["ADX"] < 13 and last["STD"] < df["close"].mean() * 0.0015:
-            logs.append("⚪ トレンド勢い不足（ADX<13 かつ STD低）→見送り")
-            return "待ち", logs, 0, 0
-
     buy = sell = 0
     tw = 2 if market == "トレンド" else 1
     rw = 2 if market == "レンジ" else 1
+
+    # --- ADXとSTD（勢い） ---
+    adx_score = 0
+    if last["ADX"] > 20:
+        adx_score += 1
+    else:
+        logs.append("⚪ ADX<20（勢い不足）")
+
+    if last["STD"] > df["close"].mean() * 0.0015:
+        adx_score += 1
+    else:
+        logs.append("⚪ STD低（ボラ不足）")
+
+    if adx_score == 0:
+        logs.append("⚠ 勢い・ボラともに不足 → 信頼度低")
 
     # --- MACD ---
     macd = df["MACD"].iloc[-3:]
@@ -172,13 +181,43 @@ def extract_signal(df):
     logs.append(log_dow)
     logs.append(pa)
 
-    # --- 非対称スコア評価 ---
+    # --- バランス型RR・ボラ補正（減点処理） ---
+    rr_weight = 0
+    std = last["STD"]
+    rr_penalty = 0
+
+    if std < df["close"].mean() * 0.0015:
+        rr_penalty += 1
+    if last["ADX"] < 20:
+        rr_penalty += 1
+
+    buy = max(buy - rr_penalty * 0.5, 0)
+    sell = max(sell - rr_penalty * 0.5, 0)
+
+    # --- 非対称エントリー基準 ---
+    decision = "待ち"
     if buy >= 4 and buy > sell:
-        return "買い", logs, buy, sell
-    elif sell >= 5 and sell > buy:  # 売りを厳しく
-        return "売り", logs, buy, sell
+        decision = "買い"
+    elif sell >= 5 and sell > buy:
+        decision = "売り"
+
+    # --- 信頼度（★可視化） ---
+    score = max(buy, sell)
+    if score >= 6:
+        stars = "★★★★★"
+    elif score >= 5:
+        stars = "★★★★☆"
+    elif score >= 4:
+        stars = "★★★☆☆"
+    elif score >= 3:
+        stars = "★★☆☆☆"
+    elif score >= 2:
+        stars = "★☆☆☆☆"
     else:
-        return "待ち", logs, buy, sell
+        stars = "☆☆☆☆☆"
+    logs.append(f"🧠 信頼度スコア: {score:.1f} → {stars}")
+
+    return decision, logs, buy, sell
 
 def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     hi = df["high"].iloc[-20:].max()
