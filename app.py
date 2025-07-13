@@ -240,7 +240,7 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         return price, 0, 0, 0, 0, 0
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
-        if rr < 1.0:
+    if rr < 1.0:
         if show_detail:
             st.markdown("#### 🔍 トレードプラン詳細")
             st.markdown(f"• STD: `{std:.5f}`, ATR: `{atr:.5f}`, ブレイク: `{is_break}`")
