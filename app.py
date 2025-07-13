@@ -240,11 +240,14 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         return price, 0, 0, 0, 0, 0
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
-    if rr < 1.0:
+        if rr < 1.0:
         if show_detail:
             st.markdown("#### 🔍 トレードプラン詳細")
-            st.warning("📛 RR比が1.0未満のため、トレードプランは表示されません（リスクリワード比が不利）")
-        return price, 0, 0, 0, 0, 0
+            st.markdown(f"• STD: `{std:.5f}`, ATR: `{atr:.5f}`, ブレイク: `{is_break}`")
+            st.markdown(f"• TP: `{tp:.5f}` (+{pips_tp:.0f}pips), SL: `{sl:.5f}` (-{pips_sl:.0f}pips)")
+            st.markdown(f"• RR比: `{rr:.2f}` ❗️※1.0未満のため非推奨")
+            st.warning("⚠ このトレードはRR（リスクリワード比）が1.0未満のため、リスクリワード的に不利です。")
+        return price, tp, sl, rr, pips_tp, pips_sl
 
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
