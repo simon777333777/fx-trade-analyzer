@@ -181,12 +181,9 @@ def extract_signal(df):
     logs.append(log_dow)
     logs.append(pa)
 
-    # --- バランス型RR・ボラ補正（減点処理） ---
-    rr_weight = 0
-    std = last["STD"]
+    # --- RR・ボラ補正（減点処理） ---
     rr_penalty = 0
-
-    if std < df["close"].mean() * 0.0015:
+    if last["STD"] < df["close"].mean() * 0.0015:
         rr_penalty += 1
     if last["ADX"] < 20:
         rr_penalty += 1
@@ -201,23 +198,12 @@ def extract_signal(df):
     elif sell >= 5 and sell > buy:
         decision = "売り"
 
-    # --- 信頼度（★可視化） ---
+    # --- 信頼度スコア（★廃止済み） ---
     score = max(buy, sell)
-    if score >= 6:
-        stars = "★★★★★"
-    elif score >= 5:
-        stars = "★★★★☆"
-    elif score >= 4:
-        stars = "★★★☆☆"
-    elif score >= 3:
-        stars = "★★☆☆☆"
-    elif score >= 2:
-        stars = "★☆☆☆☆"
-    else:
-        stars = "☆☆☆☆☆"
-    logs.append(f"🧠 信頼度スコア: {score:.1f} → {stars}")
+    logs.append(f"🧠 信頼度スコア: {score:.1f}")
 
     return decision, logs, buy, sell
+
 
 def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     hi = df["high"].iloc[-20:].max()
@@ -255,6 +241,9 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     if rr < 1.0:
+        if show_detail:
+            st.markdown("#### 🔍 トレードプラン詳細")
+            st.warning("📛 RR比が1.0未満のため、トレードプランは表示されません（リスクリワード比が不利）")
         return price, 0, 0, 0, 0, 0
 
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
@@ -267,6 +256,7 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         st.markdown(f"• RR比: `{rr:.2f}`")
 
     return price, tp, sl, rr, pips_tp, pips_sl
+
 
 def run_backtest(df, style):
     results = []
@@ -326,6 +316,7 @@ if st.button("実行"):
     st.markdown("### ⏱ 各時間足シグナル")
 
     total_buy = total_sell = 0
+    decisions = []
     main_df = None
 
     for tf in tf_map[style]:
@@ -335,6 +326,7 @@ if st.button("実行"):
         weight = tf_weights[tf]
         total_buy += b * weight
         total_sell += s * weight
+        decisions.append(sig)
 
         st.markdown(f"#### 🕒 {tf} 足: **{sig}**（スコア: {max(b, s):.1f}）")
         for log in logs:
@@ -343,26 +335,32 @@ if st.button("実行"):
         if tf == tf_map[style][1]:  # 中央時間足をメインに使用
             main_df = df.copy()
 
-    st.markdown("### 🧭 総合エントリー判断")
-    diff = total_buy - total_sell
-    if total_buy >= 2.4 and total_buy > total_sell:
-        decision = "買い"
-    elif total_sell >= 2.4 and total_sell > total_buy:
-        decision = "売り"
-    elif abs(diff) >= 1.0:
-        decision = "買い" if diff > 0 else "売り"
+    # いずれかが「買い」または「売り」の場合にのみ総合判断を表示
+    if any(d in ["買い", "売り"] for d in decisions):
+        st.markdown("### 🧭 総合エントリー判断")
+        diff = total_buy - total_sell
+        if total_buy >= 2.4 and total_buy > total_sell:
+            decision = "買い"
+        elif total_sell >= 2.4 and total_sell > total_buy:
+            decision = "売り"
+        elif abs(diff) >= 1.0:
+            decision = "買い" if diff > 0 else "売り"
+        else:
+            decision = "待ち"
+
+        st.markdown(f"• 買いスコア: `{total_buy:.2f}`, 売りスコア: `{total_sell:.2f}`")
+        st.success(f"✅ エントリー判定：**{decision}**")
+
+        if decision != "待ち" and main_df is not None:
+            price = main_df["close"].iloc[-1]
+            atr = main_df["close"].rolling(14).std().iloc[-1]
+            suggest_trade_plan(price, atr, decision, main_df, style)
+        else:
+            st.info("📭 明確なエントリーシグナルがないため、トレードプランは表示しません。")
+
     else:
-        decision = "待ち"
+        st.info("📭 各時間足に明確なエントリーシグナルがないため、総合判断は表示されません。")
 
-    st.markdown(f"• 買いスコア: `{total_buy:.2f}`, 売りスコア: `{total_sell:.2f}`")
-    st.success(f"✅ エントリー判定：**{decision}**")
-
-    if decision != "待ち" and main_df is not None:
-        price = main_df["close"].iloc[-1]
-        atr = main_df["close"].rolling(14).std().iloc[-1]
-        suggest_trade_plan(price, atr, decision, main_df, style)
-    else:
-        st.info("📭 明確なエントリーシグナルがないため、トレードプランは表示しません。")
-
+    # バックテストの実行（メイン時間足が存在する場合）
     if main_df is not None:
         run_backtest(main_df, style)
