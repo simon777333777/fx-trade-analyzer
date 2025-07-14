@@ -209,6 +209,7 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     std = df["STD"].iloc[-1]
     tp = sl = rr = pips_tp = pips_sl = 0
     is_break = False
+    warn_out_of_range = False
 
     if decision == "買い":
         if price > hi:
@@ -231,9 +232,9 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     else:
         return price, 0, 0, 0, 0, 0
 
-    # --- このチェックを緩和 or 削除 ---
+    # エントリー価格が範囲外か確認（但し表示は1回だけ）
     if not (sl < price < tp):
-        st.warning("⚠ エントリー価格がTP/SLの範囲に収まっていませんが、参考としてトレードプランを表示します。")
+        warn_out_of_range = True
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
@@ -243,6 +244,10 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         st.markdown("### 🔍 トレードプラン")
         st.markdown(f"• TP: `{tp:.3f}` (+{pips_tp:.0f}pips), SL: `{sl:.3f}` (-{pips_sl:.0f}pips)")
         st.markdown(f"• RR比: `{rr:.2f}`")
+
+        if warn_out_of_range:
+            st.warning("⚠ エントリー価格がTP/SLの範囲に収まっていません。参考値として表示しています。")
+
         if rr < 1.0:
             st.warning("⚠ RR（リスクリワード比）が1.0未満のため、リスクに対してリターンが見合っていません。非推奨トレードです。")
 
