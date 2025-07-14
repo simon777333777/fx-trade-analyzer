@@ -208,7 +208,6 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     lo = df["low"].iloc[-20:].min()
     std = df["STD"].iloc[-1]
     tp = sl = rr = pips_tp = pips_sl = 0
-    atr_mult = 1.2
     is_break = False
 
     if decision == "買い":
@@ -219,8 +218,6 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         else:
             tp = hi * 0.997
             sl = price - abs(tp - price) / 1.7
-        if not (sl < price < tp):
-            return price, 0, 0, 0, 0, 0
 
     elif decision == "売り":
         if price < lo:
@@ -230,11 +227,13 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
         else:
             tp = lo * 0.997
             sl = price + abs(tp - price) / 1.7
-        if not (tp < price < sl):
-            return price, 0, 0, 0, 0, 0
 
     else:
         return price, 0, 0, 0, 0, 0
+
+    # --- このチェックを緩和 or 削除 ---
+    if not (sl < price < tp):
+        st.warning("⚠ エントリー価格がTP/SLの範囲に収まっていませんが、参考としてトレードプランを表示します。")
 
     rr = abs((tp - price) / (sl - price)) if sl != price else 0
     pips_tp = abs(tp - price) * (100 if "JPY" in symbol else 10000)
