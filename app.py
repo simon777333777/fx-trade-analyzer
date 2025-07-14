@@ -67,19 +67,6 @@ def calc_indicators(df):
     df["LL"] = df["low"].rolling(20).min()
     return df
 
-def detect_market_structure(df):
-    last = df.iloc[-1]
-    trend_score = 0
-    if last["ADX"] > 25:
-        trend_score += 1
-    if abs(last["SMA_5"] - last["SMA_20"]) / last["close"] > 0.015:
-        trend_score += 1
-    if last["close"] > df["HH"].iloc[-1] * 0.995:
-        trend_score += 1
-    if last["close"] < df["LL"].iloc[-1] * 1.005:
-        trend_score += 1
-    return "トレンド" if trend_score >= 2 else "レンジ"
-
 def detect_dow(df):
     highs = df["high"].iloc[-3:]
     lows = df["low"].iloc[-3:]
@@ -198,10 +185,23 @@ def extract_signal(df):
     elif sell >= 5 and sell > buy:
         decision = "売り"
 
-    # --- スコアログ ---
     score = max(buy, sell)
     logs.append(f"🧠 信頼度スコア: {score:.1f}")
+
     return decision, logs, buy, sell
+
+def detect_market_structure(df):
+    last = df.iloc[-1]
+    trend_score = 0
+    if last["ADX"] > 25:
+        trend_score += 1
+    if abs(last["SMA_5"] - last["SMA_20"]) / last["close"] > 0.015:
+        trend_score += 1
+    if last["close"] > df["HH"].iloc[-1] * 0.995:
+        trend_score += 1
+    if last["close"] < df["LL"].iloc[-1] * 1.005:
+        trend_score += 1
+    return "トレンド" if trend_score >= 2 else "レンジ"
 
 def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     hi = df["high"].iloc[-20:].max()
@@ -232,6 +232,7 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
             sl = price + abs(tp - price) / 1.7
         if not (tp < price < sl):
             return price, 0, 0, 0, 0, 0
+
     else:
         return price, 0, 0, 0, 0, 0
 
@@ -240,14 +241,67 @@ def suggest_trade_plan(price, atr, decision, df, style, show_detail=True):
     pips_sl = abs(sl - price) * (100 if "JPY" in symbol else 10000)
 
     if show_detail:
-        st.markdown("### 💡 トレードプラン提案")
-        st.markdown(f"• 現在価格: `{price:.5f}`")
-        st.markdown(f"• TP: `{tp:.5f}` (+{pips_tp:.0f}pips), SL: `{sl:.5f}` (-{pips_sl:.0f}pips)")
+        st.markdown("### 🔍 トレードプラン")
+        st.markdown(f"• TP: `{tp:.3f}` (+{pips_tp:.0f}pips), SL: `{sl:.3f}` (-{pips_sl:.0f}pips)")
         st.markdown(f"• RR比: `{rr:.2f}`")
         if rr < 1.0:
-            st.warning("⚠ RR（リスクリワード比）が1.0未満のため、このトレードは期待値的に不利です。")
+            st.warning("⚠ RR（リスクリワード比）が1.0未満のため、リスクに対してリターンが見合っていません。非推奨トレードです。")
 
     return price, tp, sl, rr, pips_tp, pips_sl
+
+def run_backtest(df, style):
+    results = []
+    for i in range(100, len(df) - 5):
+        sub = df.iloc[i - 50:i + 1].copy()
+        sig, logs, _, _ = extract_signal(sub)
+        price = sub["close"].iloc[-1]
+        atr = sub["close"].rolling(14).std().iloc[-1]
+        entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, sig, sub, style, show_detail=False)
+        if tp == 0 or sl == 0:
+            continue
+
+        future_high = df["high"].iloc[i + 1:i + 5].max()
+        future_low = df["low"].iloc[i + 1:i + 5].min()
+        hit = None
+        if sig == "買い":
+            if future_high >= tp:
+                hit = "win"
+            elif future_low <= sl:
+                hit = "lose"
+        elif sig == "売り":
+            if future_low <= tp:
+                hit = "win"
+            elif future_high >= sl:
+                hit = "lose"
+
+        if sig != "待ち":
+            results.append({
+                "No": i,
+                "日付": df.index[i].strftime("%Y-%m-%d %H:%M:%S"),
+                "シグナル": sig,
+                "結果": hit if hit else "-",
+                "TP": round(tp, 3),
+                "SL": round(sl, 3),
+                "エントリー価格": round(price, 3),
+                "判定ログ": ", ".join(logs),
+                "損益pips": ptp if hit == "win" else (-psl if hit == "lose" else 0)
+            })
+
+    if results:
+        df_result = pd.DataFrame(results).sort_values("No", ascending=False)
+        wins = df_result["結果"].value_counts().get("win", 0)
+        total = df_result["結果"].isin(["win", "lose"]).sum()
+        win_rate = (wins / total * 100) if total > 0 else 0
+        avg_pips = df_result[df_result["結果"].isin(["win", "lose"])]["損益pips"].mean()
+
+        st.markdown("### 📊 バックテスト結果")
+        st.markdown(f"• 勝率：{win_rate:.1f}%（{wins}勝 / {total}回）")
+        st.markdown(f"• 平均pips：{avg_pips:.1f}")
+
+        with st.expander("📋 詳細ログ"):
+            st.dataframe(df_result)
+
+# ----------------- Streamlit 実行処理 ------------------
 
 if st.button("実行"):
     st.subheader(f"📌 通貨: {symbol} ｜ スタイル: {style}")
@@ -266,15 +320,15 @@ if st.button("実行"):
         total_sell += s * weight
         decisions.append(sig)
 
-        st.markdown(f"#### 🕒 {tf} 足: **{sig}**（スコア: {max(b, s):.1f}）")
+        st.markdown(f"#### 🕒 {tf}足: **{sig}**（スコア: {max(b, s):.1f}）")
         for log in logs:
             st.markdown(f"・{log}")
 
-        if tf == tf_map[style][1]:  # 中央時間足をメインに使用
+        if tf == tf_map[style][1]:
             main_df = df.copy()
 
     if any(d in ["買い", "売り"] for d in decisions):
-        st.markdown("### 🧭 総合エントリー判断")
+        st.markdown("### 🧭 総合判断")
         diff = total_buy - total_sell
         if total_buy >= 2.4 and total_buy > total_sell:
             decision = "買い"
@@ -288,18 +342,15 @@ if st.button("実行"):
         st.markdown(f"• 買いスコア: `{total_buy:.2f}`, 売りスコア: `{total_sell:.2f}`")
         st.success(f"✅ エントリー判定：**{decision}**")
 
-        if decision != "待ち" and main_df is not None:
+        if main_df is not None:
             price = main_df["close"].iloc[-1]
             atr = main_df["close"].rolling(14).std().iloc[-1]
-            price, tp, sl, rr, pips_tp, pips_sl = suggest_trade_plan(price, atr, decision, main_df, style)
-            if rr < 1.0:
-                st.warning("⚠ 注意：リスクリワード比（RR）が1.0未満のため、このトレードは期待値的に不利です。")
-        else:
-            st.info("📭 明確なエントリーシグナルがないため、トレードプランは表示しません。")
-
+            suggest_trade_plan(price, atr, decision, main_df, style)
     else:
-        st.info("📭 各時間足に明確なエントリーシグナルがないため、総合判断は表示されません。")
+        st.info("📭 シグナルが不明確なため、トレードプランは表示されません。")
 
-　　# バックテストの実行（メイン時間足が存在する場合）
-　　if main_df is not None:
-     run_backtest(main_df, style)
+    if main_df is not None:
+        run_backtest(main_df, style)
+
+
+
