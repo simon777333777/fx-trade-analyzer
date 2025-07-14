@@ -300,6 +300,6 @@ if st.button("実行"):
     else:
         st.info("📭 各時間足に明確なエントリーシグナルがないため、総合判断は表示されません。")
 
-    # バックテストの実行（メイン時間足が存在する場合）
-    if main_df is not None:
-        run_backtest(main_df, style)
+# バックテストの実行（メイン時間足が存在する場合）
+if main_df is not None:
+    run_backtest(main_df, style)
