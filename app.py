@@ -257,33 +257,49 @@ def run_backtest(df, style):
     results = []
     for i in range(100, len(df) - 5):
         sub = df.iloc[i - 50:i + 1].copy()
-        sig, logs, _, _ = extract_signal(sub)
+        sig, logs, b_score, s_score = extract_signal(sub)
         price = sub["close"].iloc[-1]
         atr = sub["close"].rolling(14).std().iloc[-1]
         entry, tp, sl, rr, ptp, psl = suggest_trade_plan(price, atr, sig, sub, style, show_detail=False)
-        if tp == 0 or sl == 0:
+
+        # --- ① TP/SL整合性チェック ---
+        if tp == 0 or sl == 0 or not (sl < entry < tp):
             continue
 
-        future_high = df["high"].iloc[i + 1:i + 5].max()
-        future_low = df["low"].iloc[i + 1:i + 5].min()
-        hit = None
-        if sig == "買い":
-            if future_high >= tp:
-                hit = "win"
-            elif future_low <= sl:
-                hit = "lose"
-        elif sig == "売り":
-            if future_low <= tp:
-                hit = "win"
-            elif future_high >= sl:
-                hit = "lose"
+        # --- ⑤ RR制限（RR < 1.0 は除外） ---
+        if rr < 1.0:
+            continue
+
+        # --- ② 未来4本での先着判定ロジック ---
+        future_highs = df["high"].iloc[i + 1:i + 5]
+        future_lows = df["low"].iloc[i + 1:i + 5]
+        hit = "-"
+        for fh, fl in zip(future_highs, future_lows):
+            if sig == "買い":
+                if fh >= tp:
+                    hit = "win"
+                    break
+                elif fl <= sl:
+                    hit = "lose"
+                    break
+            elif sig == "売り":
+                if fl <= tp:
+                    hit = "win"
+                    break
+                elif fh >= sl:
+                    hit = "lose"
+                    break
+
+        # --- ③ 売りだけ厳格化（スコア6未満は除外） ---
+        if sig == "売り" and s_score < 5.5:
+            continue
 
         if sig != "待ち":
             results.append({
                 "No": i,
                 "日付": df.index[i].strftime("%Y-%m-%d %H:%M:%S"),
                 "シグナル": sig,
-                "結果": hit if hit else "-",
+                "結果": hit,
                 "TP": round(tp, 3),
                 "SL": round(sl, 3),
                 "エントリー価格": round(price, 3),
@@ -291,6 +307,7 @@ def run_backtest(df, style):
                 "損益pips": ptp if hit == "win" else (-psl if hit == "lose" else 0)
             })
 
+    # --- 出力 ---
     if results:
         df_result = pd.DataFrame(results).sort_values("No", ascending=False)
         wins = df_result["結果"].value_counts().get("win", 0)
@@ -304,6 +321,8 @@ def run_backtest(df, style):
 
         with st.expander("📋 詳細ログ"):
             st.dataframe(df_result)
+    else:
+        st.warning("✅ 有効なトレードシグナルが条件を満たさなかったため、バックテスト結果がありません。")
 
 # ----------------- Streamlit 実行処理 ------------------
 
