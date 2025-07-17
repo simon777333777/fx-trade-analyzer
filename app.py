@@ -375,5 +375,26 @@ if st.button("実行"):
     if main_df is not None:
         run_backtest(main_df, style)
 
+# --- メイン処理 ---
+uploaded_file = st.file_uploader("CSVファイルをアップロード", type=["csv"])
+use_swing = st.checkbox("スイングトレードロジックを使用", value=True)
+
+if uploaded_file:
+    df = load_data(uploaded_file)
+    df = calculate_indicators(df)
+    logs, win_rate, expected_value = backtest(df, use_swing=use_swing)
+
+    st.subheader("📊 バックテスト結果")
+    st.markdown(f"- **勝率**: {win_rate:.2f}%")
+    st.markdown(f"- **期待値**: {expected_value:.2f} RR（1トレードあたり）")
+
+    if logs:
+        st.subheader("📝 バックテストログ")
+        with st.expander("▶ 詳細ログを表示", expanded=False):
+            df_logs = pd.DataFrame(logs)
+            st.dataframe(df_logs, use_container_width=True)
+    else:
+        st.info("表示できるトレードログがありません（シグナルまたはRR条件未達）")
+
 
 
