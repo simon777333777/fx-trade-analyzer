@@ -103,16 +103,31 @@ def rci_based_signal(df):
 
 def generate_trade_plan(df):
     entry = df["close"].iloc[-1]
-    tp = entry + df["STD"].iloc[-1] * 1.5
-    sl = entry - df["STD"].iloc[-1] * 1.0
+    recent_high = df["high"].rolling(window=20).max().iloc[-1]
+    recent_low = df["low"].rolling(window=20).min().iloc[-1]
+
+    tp = recent_high if recent_high > entry else entry + df["STD"].iloc[-1] * 1.5
+    sl = recent_low if recent_low < entry else entry - df["STD"].iloc[-1] * 1.0
+
     rr = round((tp - entry) / (entry - sl), 2) if (entry - sl) != 0 else 0
+
+    comment = ""
+    if rr < 1.0:
+        comment = "⚠️ リスクリワード比が1.0未満のため注意が必要です。"
+    elif rr < 1.5:
+        comment = "🟡 リスクリワードは平均的ですが、トレンド確認を。"
+    else:
+        comment = "🟢 十分なRRで、シグナルとの整合性も高い可能性あり。"
+
     return {
         "エントリー価格": round(entry, 3),
         "利確（TP）": round(tp, 3),
         "損切り（SL）": round(sl, 3),
-        "リスクリワード比（RR）": rr
+        "リスクリワード比（RR）": rr,
+        "コメント": comment
     }
 
+# 以下、st.button("実行") の中にこのコードを挿入
 if st.button("実行"):
     for tf in tf_map[style]:
         st.subheader(f"⏱ 時間足：{tf}")
