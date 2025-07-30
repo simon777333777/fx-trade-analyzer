@@ -3,119 +3,152 @@ import pandas as pd
 import numpy as np
 import requests
 
-st.set_page_config(page_title="RCI主軸FXトレード分析", layout="centered")
-API_KEY = st.secrets["API_KEY"]
+# ----------------------------------------
+# API設定・トレードスタイル選択
+# ----------------------------------------
+st.title("RCI主軸FX分析ツール")
 
-st.title("📈 RCI主軸FXトレード分析ツール")
-symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=0)
-style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=1)
-use_dummy = st.checkbox("📦 ダミーデータで実行", value=False)
+api_key = st.text_input("APIキーを入力してください", type="password")
+symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY"])
+style = st.radio("トレードスタイル", ["スキャル", "デイトレ", "スイング"])
 
-tf_map = {
-    "スキャルピング": ["5min", "15min", "1h"],
-    "デイトレード": ["15min", "1h", "4h"],
-    "スイング": ["1h", "4h", "1day"]
-}
+# ----------------------------------------
+# RCIパラメータ設定（スタイル別）
+# ----------------------------------------
+if style == "スキャル":
+    rci_params = [9, 26]
+elif style == "デイトレ":
+    rci_params = [12, 52]
+else:  # スイング
+    rci_params = [26, 104]
 
-def get_dummy_data():
-    idx = pd.date_range(end=pd.Timestamp.now(), periods=150, freq="H")
-    price = np.cumsum(np.random.randn(len(idx))) + 150
-    return pd.DataFrame({
-        "datetime": idx,
-        "open": price + np.random.randn(len(idx)),
-        "high": price + 1,
-        "low": price - 1,
-        "close": price,
-        "volume": 1000
-    }).set_index("datetime")
-
-@st.cache_data(ttl=300)
-def fetch_data(symbol, interval, use_dummy):
-    if use_dummy:
-        return get_dummy_data()
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=500&apikey={API_KEY}"
-    r = requests.get(url)
-    data = r.json()
-    if "values" not in data:
-        raise ValueError(f"APIエラー: {data}")
-    df = pd.DataFrame(data["values"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
+# ----------------------------------------
+# データ取得関数（仮）
+# ----------------------------------------
+def fetch_data(symbol: str, api_key: str, interval: str = "1h", length: int = 300) -> pd.DataFrame:
+    """APIからOHLCVデータ取得（仮のローカルサンプルで代用）"""
+    # 本来はAPIリクエスト。ここではダミーデータ生成。
+    dates = pd.date_range(end=pd.Timestamp.now(), periods=length, freq="1h")
+    prices = np.cumsum(np.random.randn(length)) + 150
+    highs = prices + np.random.rand(length)
+    lows = prices - np.random.rand(length)
+    df = pd.DataFrame({
+        "datetime": dates,
+        "open": prices + np.random.randn(length)*0.2,
+        "high": highs,
+        "low": lows,
+        "close": prices,
+    })
     df.set_index("datetime", inplace=True)
-    df = df.sort_index()
-    df = df.apply(pd.to_numeric, errors="coerce")
     return df
 
-def calc_indicators(df):
-    for period in [9, 26, 52]:
-        df[f"RCI_{period}"] = df["close"].rolling(period).apply(
-            lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1] if x.notna().all() else np.nan,
-            raw=False
-        )
-    df["MACD"] = df["close"].ewm(span=12).mean() - df["close"].ewm(span=26).mean()
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
-    df["SMA_9"] = df["close"].rolling(9).mean()
-    df["SMA_26"] = df["close"].rolling(26).mean()
-    df["STD"] = df["close"].rolling(20).std()
-    return df
+# ----------------------------------------
+# RCI算出
+# ----------------------------------------
+def calculate_rci(df: pd.DataFrame, period: int) -> pd.Series:
+    rci = []
+    for i in range(len(df)):
+        if i < period:
+            rci.append(np.nan)
+            continue
+        close = df['close'].iloc[i - period + 1:i + 1]
+        time_rank = np.arange(period, 0, -1)
+        price_rank = close.rank(ascending=False).values
+        diff_sq = (time_rank - price_rank) ** 2
+        rci_value = (1 - (6 * np.sum(diff_sq)) / (period * (period ** 2 - 1))) * 100
+        rci.append(rci_value)
+    return pd.Series(rci, index=df.index)
 
-def rci_based_signal(df):
-    last = df.iloc[-1]
-    score = 0
-    logs = []
+# ----------------------------------------
+# シグナル判定
+# ----------------------------------------
+def detect_signal(df: pd.DataFrame, rci_short: pd.Series, rci_long: pd.Series):
+    signal = []
+    for i in range(len(df)):
+        if np.isnan(rci_short[i]) or np.isnan(rci_long[i]):
+            signal.append("")
+            continue
+        if rci_short[i] > 80 and rci_long[i] > 50:
+            signal.append("売り")
+        elif rci_short[i] < -80 and rci_long[i] < -50:
+            signal.append("買い")
+        else:
+            signal.append("")
+    return pd.Series(signal, index=df.index)
 
-    # 短期RCI
-    if last["RCI_9"] >= 0.8:
-        logs.append("• 短期RCI（9）：+80以上 → 強い上昇トレンド")
-        score += 2
+# ----------------------------------------
+# スイング高値/安値の取得（TP/SL用）
+# ----------------------------------------
+def get_swing_points(df: pd.DataFrame, index: int, window: int = 10):
+    """直近の高値・安値をエントリー基準に取得"""
+    high = df["high"].iloc[index-window:index].max()
+    low = df["low"].iloc[index-window:index].min()
+    return high, low
+
+# ----------------------------------------
+# トレードプラン生成
+# ----------------------------------------
+def generate_trade_plan(df: pd.DataFrame, signal: pd.Series):
+    plans = []
+    for i in range(len(signal)):
+        if signal[i] not in ["買い", "売り"]:
+            plans.append(None)
+            continue
+        entry_price = df["close"].iloc[i]
+        swing_high, swing_low = get_swing_points(df, i)
+
+        if signal[i] == "買い":
+            sl = swing_low
+            tp = entry_price + (entry_price - sl)
+        else:  # 売り
+            sl = swing_high
+            tp = entry_price - (sl - entry_price)
+
+        rr = abs(tp - entry_price) / abs(entry_price - sl) if sl != entry_price else 0
+        plan = {
+            "エントリー価格": round(entry_price, 3),
+            "TP": round(tp, 3),
+            "SL": round(sl, 3),
+            "RR": round(rr, 2),
+            "注意": "※リスクリワード比が1.0未満です。" if rr < 1.0 else ""
+        }
+        plans.append(plan)
+    return plans
+
+# ----------------------------------------
+# メイン処理
+# ----------------------------------------
+if st.button("分析開始"):
+
+    if not api_key:
+        st.warning("APIキーを入力してください")
+        st.stop()
+
+    df = fetch_data(symbol, api_key)
+    rci_short = calculate_rci(df, rci_params[0])
+    rci_long = calculate_rci(df, rci_params[1])
+    df["RCI短期"] = rci_short
+    df["RCI長期"] = rci_long
+    df["シグナル"] = detect_signal(df, rci_short, rci_long)
+    df["トレードプラン"] = generate_trade_plan(df, df["シグナル"])
+
+    latest_signal = df["シグナル"].iloc[-1]
+    st.subheader(f"最新シグナル: {latest_signal or 'なし'}")
+
+    if latest_signal in ["買い", "売り"]:
+        plan = df["トレードプラン"].iloc[-1]
+        if plan:
+            st.subheader("📊 トレードプラン")
+            st.write(f"エントリー価格: {plan['エントリー価格']}")
+            st.write(f"TP: {plan['TP']}")
+            st.write(f"SL: {plan['SL']}")
+            st.write(f"リスクリワード比: {plan['RR']}")
+            if plan["RR"] < 1.0:
+                st.warning(plan["注意"])
+        else:
+            st.info("有効なトレードプランが生成できませんでした。")
     else:
-        logs.append("• 短期RCI（9）：未達")
+        st.info("現在、エントリーシグナルは出ていません。")
 
-    # 中期RCI
-    if df["RCI_26"].iloc[-1] > df["RCI_26"].iloc[-2]:
-        logs.append("• 中期RCI（26）：上昇中 → 支持")
-        score += 1
-    else:
-        logs.append("• 中期RCI（26）：下降傾向")
-
-    # 長期RCI
-    if last["RCI_52"] >= 0.5:
-        logs.append("• 長期RCI（52）：+50超 → 中長期も上昇傾向")
-        score += 1
-    else:
-        logs.append("• 長期RCI（52）：未達")
-
-    # MACD
-    if last["MACD"] > last["Signal"] and df["MACD"].diff().iloc[-1] > 0:
-        logs.append("• MACD：ゴールデンクロス直後（買い支持）")
-        score += 1
-    else:
-        logs.append("• MACD：判定弱")
-
-    # SMA位置
-    if last["close"] > last["SMA_9"] and last["close"] > last["SMA_26"]:
-        logs.append("• SMA：ローソク足が短期・中期SMAより上（順行）")
-        score += 1
-    else:
-        logs.append("• SMA：順行でない")
-
-    # ボラティリティ
-    if 0 < last["STD"] < df["STD"].mean() * 1.5:
-        logs.append("• ボラティリティ：安定上昇（過熱感なし）")
-        score += 1
-    else:
-        logs.append("• ボラティリティ：高騰 or 低迷")
-
-    return score, logs
-
-if st.button("実行"):
-    for tf in tf_map[style]:
-        st.subheader(f"⏱ 時間足：{tf}")
-        df = fetch_data(symbol, tf, use_dummy)
-        df = calc_indicators(df)
-        score, logs = rci_based_signal(df)
-        decision = "🟢 エントリー判定：買い" if score >= 6 else "⚪ 判定保留"
-
-        st.markdown(f"**{decision}**")
-        for log in logs:
-            st.markdown(log)
-        st.markdown(f"**信頼度スコア：{score} / 7点**")
+    # チャート確認用
+    st.line_chart(df[["close", "RCI短期", "RCI長期"]].dropna())
