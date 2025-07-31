@@ -60,63 +60,43 @@ def calc_indicators(df):
 
 def rci_based_signal(df):
     last = df.iloc[-1]
-    prev = df.iloc[-2]
     logs = []
 
-    # 状態取得
     rci_short = last["RCI_9"]
     rci_mid = last["RCI_26"]
     rci_long = last["RCI_52"]
+    macd = last["MACD"]
+    signal = last["Signal"]
+    close = last["close"]
+    sma9 = last["SMA_9"]
+    sma26 = last["SMA_26"]
+    std = last["STD"]
 
-    # 短期RCIクロス判定
-    short_cross_neg80 = prev["RCI_9"] < -0.8 and rci_short >= -0.8
-    short_cross_zero = prev["RCI_9"] < 0 and rci_short >= 0
+    signal_flag = False
 
-    # 中長期RCIの上昇・プラス圏判定
-    mid_up = df["RCI_26"].iloc[-1] > df["RCI_26"].iloc[-2]
-    long_up = df["RCI_52"].iloc[-1] > df["RCI_52"].iloc[-2]
+    # 総合判定ロジック
+    if rci_short >= 0.8 and rci_mid > df["RCI_26"].iloc[-2] and rci_long >= 0.5:
+        if macd > signal and df["MACD"].diff().iloc[-1] > 0:
+            if close > sma9 and close > sma26:
+                if 0 < std < df["STD"].mean() * 1.5:
+                    signal_flag = True
 
-    mid_pos = rci_mid > 0
-    long_pos = rci_long > 0
-
-    # MACD補助
-    macd_bullish = last["MACD"] > last["Signal"] and df["MACD"].diff().iloc[-1] > 0
-    sma_bullish = last["close"] > last["SMA_9"] and last["close"] > last["SMA_26"]
-
-    # ロジック判定
-    if short_cross_neg80 and mid_up and long_up and mid_pos and long_pos:
-        logs.append("✅ パターン①：短期RCIが-80上抜け＋中長期クロス上昇＋＋圏 → 強い買い")
-        decision = "🟢 エントリー判定：買い"
-    elif short_cross_neg80 and mid_pos and long_pos:
-        logs.append("✅ パターン②：短期RCIが-80上抜け＋中長期＋圏維持 → 買い")
-        decision = "🟢 エントリー判定：買い"
-    elif short_cross_zero and mid_pos and long_pos:
-        logs.append("✅ パターン③：短期RCIが0上抜け＋中長期＋圏維持 → 買い")
-        decision = "🟢 エントリー判定：買い"
-    elif rci_short < -0.8 and not (mid_pos and long_pos):
-        logs.append("⌛ 短期RCIが底で推移中＋中長期弱気 → 待ち")
-        decision = "🟡 待機"
+    if signal_flag:
+        logs.append("✅ 総合判定：RCI・MACD・SMA・ボラティリティすべてが買い傾向を支持")
+        score = 7
     else:
-        logs.append("❌ 条件不一致 → エントリー見送り")
-        decision = "⚪ 判定保留"
+        score = 0
+        logs.append("⚠️ 総合判定：買いシグナルの条件を満たしていません")
 
-    # 補足情報（MACD・SMA・ボラティリティ）
-    if macd_bullish:
-        logs.append("• MACD：GC直後 → モメンタム良好")
-    else:
-        logs.append("• MACD：弱含み")
+    # 詳細ログ
+    logs.append(f"• 短期RCI（9）: {round(rci_short, 2)}")
+    logs.append(f"• 中期RCI（26）: {'上昇中' if rci_mid > df['RCI_26'].iloc[-2] else '下降中'}")
+    logs.append(f"• 長期RCI（52）: {round(rci_long, 2)}")
+    logs.append(f"• MACD判定: {'GC直後' if macd > signal and df['MACD'].diff().iloc[-1] > 0 else '弱め'}")
+    logs.append(f"• SMA判定: {'順行' if close > sma9 and close > sma26 else '逆行'}")
+    logs.append(f"• ボラティリティ: {'通常範囲' if 0 < std < df['STD'].mean() * 1.5 else '高騰/低迷'}")
 
-    if sma_bullish:
-        logs.append("• SMA：順行")
-    else:
-        logs.append("• SMA：逆行 or 接触中")
-
-    if 0 < last["STD"] < df["STD"].mean() * 1.5:
-        logs.append("• ボラティリティ：安定範囲")
-    else:
-        logs.append("• ボラティリティ：高騰 or 低迷")
-
-    return decision, logs
+    return score, logs
 
 def generate_trade_plan(df):
     entry = df["close"].iloc[-1]
@@ -149,13 +129,16 @@ if st.button("実行"):
         st.subheader(f"⏱ 時間足：{tf}")
         df = fetch_data(symbol, tf, use_dummy)
         df = calc_indicators(df)
-        decision, logs = rci_based_signal(df)
-st.markdown(f"**{decision}**")
-for log in logs:
-    st.markdown(log)
+        score, logs = rci_based_signal(df)
+        decision = "🟢 エントリー判定：買い" if score == 7 else "⚪ 判定保留"
 
-if "買い" in decision:
-    plan = generate_trade_plan(df)
-    st.subheader("🧮 トレードプラン（RCI主軸型）")
-    for k, v in plan.items():
-        st.write(f"{k}: {v}")
+        st.markdown(f"**{decision}**")
+        for log in logs:
+            st.markdown(log)
+        st.markdown(f"**信頼度スコア：{score} / 7点**")
+
+        if score == 7:
+            plan = generate_trade_plan(df)
+            st.subheader("🧮 トレードプラン（RCI主軸型）")
+            for k, v in plan.items():
+                st.write(f"{k}: {v}")
