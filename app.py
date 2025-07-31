@@ -127,7 +127,6 @@ def generate_trade_plan(df):
         "コメント": comment
     }
 
-# 以下、st.button("実行") の中にこのコードを挿入
 if st.button("実行"):
     for tf in tf_map[style]:
         st.subheader(f"⏱ 時間足：{tf}")
