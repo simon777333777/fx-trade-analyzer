@@ -7,8 +7,8 @@ st.set_page_config(page_title="RCI主軸FXトレード分析", layout="centered"
 API_KEY = st.secrets["API_KEY"]
 
 st.title("📈 RCI主軸FXトレード分析ツール")
-symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=3)
-style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=3)
+symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=0)
+style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=1)
 use_dummy = st.checkbox("📦 ダミーデータで実行", value=False)
 
 tf_map = {
@@ -281,4 +281,3 @@ if st.button("実行"):
             st.subheader("🧮 トレードプラン（RCI主軸型）")
             for k, v in plan.items():
                 st.write(f"{k}: {v}")
-
