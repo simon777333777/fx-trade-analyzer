@@ -6,7 +6,7 @@ import requests
 st.set_page_config(page_title="RCI主軸FXトレード分析", layout="centered")
 API_KEY = st.secrets["API_KEY"]
 
-st.title("📈 RCI主軸FXトレード分析ツール")
+st.title("📈 RCI主軸FXトレード分析ツール2025/08/04")
 symbol = st.selectbox("通貨ペアを選択", ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"], index=0)
 style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=1)
 use_dummy = st.checkbox("📦 ダミーデータで実行", value=False)
@@ -46,7 +46,7 @@ def fetch_data(symbol, interval, use_dummy):
     return df
 
 def calc_indicators(df):
-    for period in [9, 26, 52, 104]:
+    for period in [9, 26, 52]:
         df[f"RCI_{period}"] = df["close"].rolling(period).apply(
             lambda x: np.corrcoef(np.arange(len(x)), x)[0, 1] if x.notna().all() else np.nan,
             raw=False
@@ -63,71 +63,45 @@ def calc_indicators(df):
 def get_thresholds(style):
     # (短期RCI閾値, 長期RCI閾値)
     if style == "スキャルピング":
-        return 0.85, 0.6
-    elif style == "デイトレード":
         return 0.8, 0.5
+    elif style == "デイトレード":
+        return 0.7, 0.4
     else:  # スイング
-        return 0.75, 0.5
-
-def summary_direction(df, style):
-    """上位足のざっくり方向性フィルタ（順張り方向）"""
-    last = df.iloc[-1]
-    short_thr, long_thr = get_thresholds(style)
-    # choose appropriate long period depending on style
-    if style == "スイング":
-        long_rci = last.get("RCI_104", np.nan)
-    else:
-        long_rci = last.get("RCI_52", np.nan)
-    mid_rci = last.get("RCI_26", np.nan)
-    macd = last["MACD"]
-    signal = last["Signal"]
-    macd_diff = df["MACD"].diff().iloc[-1]
-    macd_cross_up = macd > signal and macd_diff > 0
-    macd_cross_down = macd < signal and macd_diff < 0
-
-    if long_rci >= long_thr and mid_rci >= 0 and macd_cross_up:
-        return "買い"
-    if long_rci <= -long_thr and mid_rci <= 0 and macd_cross_down:
-        return "売り"
-    return "中立"
+        return 0.6, 0.3
 
 def rci_based_signal(df, style):
     last = df.iloc[-1]
     short_thr, long_thr = get_thresholds(style)
 
-    # select periods per style
-    if style == "スイング":
-        rci_long = last["RCI_104"]
-    else:
-        rci_long = last["RCI_52"]
+    rci_9 = last.get("RCI_9", np.nan)
+    rci_26_now = last.get("RCI_26", np.nan)
+    rci_26_prev = df["RCI_26"].iloc[-2] if len(df) >= 2 else np.nan
+    rci_52 = last.get("RCI_52", np.nan)
 
-    rci_short = last["RCI_9"]
-    rci_mid_now = last["RCI_26"]
-    rci_mid_prev = df["RCI_26"].iloc[-2] if len(df) >= 2 else np.nan
-
-    macd = last["MACD"]
-    signal = last["Signal"]
-    macd_diff = df["MACD"].diff().iloc[-1]
-    macd_cross_up = macd > signal and macd_diff > 0
-    macd_cross_down = macd < signal and macd_diff < 0
+    macd = last.get("MACD", np.nan)
+    signal = last.get("Signal", np.nan)
+    macd_diff = df["MACD"].diff().iloc[-1] if "MACD" in df.columns else 0
+    macd_cross_up = (macd > signal) and (macd_diff > 0)
+    macd_cross_down = (macd < signal) and (macd_diff < 0)
 
     close = last["close"]
-    bb_upper = last["BB_Upper"]
-    bb_lower = last["BB_Lower"]
-    bb_mid = last["BB_Mid"]
-    std = last["BB_Std"]
-    std_mean = df["BB_Std"].mean()
+    bb_upper = last.get("BB_Upper", np.nan)
+    bb_lower = last.get("BB_Lower", np.nan)
+    bb_mid = last.get("BB_Mid", np.nan)
+    std = last.get("BB_Std", np.nan)
+    std_mean = df["BB_Std"].mean() if "BB_Std" in df.columns else np.nan
 
     logs = []
 
     # 順張り買い
     if (
-        rci_short > short_thr
-        and rci_mid_now > rci_mid_prev
-        and rci_long > long_thr
+        not np.isnan(rci_9) and not np.isnan(rci_26_now) and not np.isnan(rci_52)
+        and rci_9 > short_thr
+        and rci_26_now > rci_26_prev
+        and rci_52 > long_thr
         and macd_cross_up
         and close > bb_mid
-        and 0 < std < std_mean * 1.5
+        and (0 < std < std_mean * 1.5)
     ):
         logs.append("✅ 買いシグナル（順張り）: 短期/中期/長期RCI上向き, MACD GC, BB順行, 安定ボラ")
         score = 7
@@ -135,15 +109,16 @@ def rci_based_signal(df, style):
         mode = "順張り"
         return score, signal_type, mode, logs
 
-    # 逆張り買い（過冷え反転想定）
+    # 逆張り買い（反発想定）
     if (
-        rci_short < -short_thr
-        and rci_mid_now < rci_mid_prev
-        and rci_long < -long_thr
+        not np.isnan(rci_9) and not np.isnan(rci_26_now) and not np.isnan(rci_52)
+        and rci_9 < -short_thr
+        and rci_26_now < rci_26_prev
+        and rci_52 < -long_thr
         and macd_cross_up
         and close < bb_lower
     ):
-        logs.append("✅ 買いシグナル（逆張り）: 過冷えRCI反転想定, MACD GC, BB下限反発狙い")
+        logs.append("✅ 買いシグナル（逆張り）: RCI反転想定, MACD GC, BB下限反発狙い")
         score = 7
         signal_type = "買い"
         mode = "逆張り"
@@ -151,12 +126,13 @@ def rci_based_signal(df, style):
 
     # 順張り売り
     if (
-        rci_short < -short_thr
-        and rci_mid_now < rci_mid_prev
-        and rci_long < -long_thr
+        not np.isnan(rci_9) and not np.isnan(rci_26_now) and not np.isnan(rci_52)
+        and rci_9 < -short_thr
+        and rci_26_now < rci_26_prev
+        and rci_52 < -long_thr
         and macd_cross_down
         and close < bb_mid
-        and 0 < std < std_mean * 1.5
+        and (0 < std < std_mean * 1.5)
     ):
         logs.append("🟥 売りシグナル（順張り）: 短期/中期/長期RCI下向き, MACD DC, BB順行, 安定ボラ")
         score = -7
@@ -164,30 +140,31 @@ def rci_based_signal(df, style):
         mode = "順張り"
         return score, signal_type, mode, logs
 
-    # 逆張り売り（過熱反転想定）
+    # 逆張り売り（天井反転狙い）
     if (
-        rci_short > short_thr
-        and rci_mid_now > rci_mid_prev
-        and rci_long > long_thr
+        not np.isnan(rci_9) and not np.isnan(rci_26_now) and not np.isnan(rci_52)
+        and rci_9 > short_thr
+        and rci_26_now > rci_26_prev
+        and rci_52 > long_thr
         and macd_cross_down
         and close > bb_upper
     ):
-        logs.append("🟥 売りシグナル（逆張り）: 過熱RCI反転想定, MACD DC, BB上限反発狙い")
+        logs.append("🟥 売りシグナル（逆張り）: RCI反転想定, MACD DC, BB上限反発狙い")
         score = -7
         signal_type = "売り"
         mode = "逆張り"
         return score, signal_type, mode, logs
 
-    # 否定・保留の詳細ログ
-    if rci_short > short_thr:
-        logs.append(f"• 短期RCI（9）: 高水準 {round(rci_short,2)}")
-    elif rci_short < -short_thr:
-        logs.append(f"• 短期RCI（9）: 低水準 {round(rci_short,2)}")
+    # 否定・保留（詳細要素を羅列）
+    if rci_9 > short_thr:
+        logs.append(f"• 短期RCI（9）: 高水準 {round(rci_9,2)}")
+    elif rci_9 < -short_thr:
+        logs.append(f"• 短期RCI（9）: 低水準 {round(rci_9,2)}")
     else:
-        logs.append(f"• 短期RCI（9）: 中立 {round(rci_short,2)}")
+        logs.append(f"• 短期RCI（9）: 中立 {round(rci_9,2)}")
 
-    logs.append(f"• 中期RCI（26）: {'上昇中' if rci_mid_now > rci_mid_prev else '下降中'} ({round(rci_mid_now,2)})")
-    logs.append(f"• 長期RCI: {round(rci_long,2)}")
+    logs.append(f"• 中期RCI（26）: {'上昇中' if rci_26_now > rci_26_prev else '下降中'} ({round(rci_26_now,2) if not np.isnan(rci_26_now) else 'nan'})")
+    logs.append(f"• 長期RCI（52）: {round(rci_52,2) if not np.isnan(rci_52) else 'nan'}")
 
     logs.append(f"• MACD: {'GC' if macd_cross_up else ('DC' if macd_cross_down else 'なし')}")
     logs.append(f"• BB位置: close={round(close,3)}, 上限={round(bb_upper,3)}, 下限={round(bb_lower,3)}, 中間={round(bb_mid,3)}")
@@ -202,7 +179,6 @@ def generate_trade_plan(df, signal_score, signal_type, mode):
     bb_lower = df["BB_Lower"].iloc[-1]
     bb_mid = df["BB_Mid"].iloc[-1]
 
-    # 順張りはボラをベースに幅、逆張りは反転付近を狙う想定
     if signal_type == "買い":
         if mode == "順張り":
             tp = entry + std * 2.0
@@ -233,40 +209,15 @@ def generate_trade_plan(df, signal_score, signal_type, mode):
     }
 
 if st.button("実行"):
-    # 上位→下位のフィルタ順に扱うため、各時間足ごとの方向を先に取得
-    tf_list = tf_map[style]
-    # 定義：上位足はリストの逆（最後が上位）
-    high_to_low = list(reversed(tf_list))
-    summary_dirs = {}
-    dfs = {}
-    for tf in tf_list:
+    for tf in tf_map[style]:
+        st.subheader(f"⏱ 時間足：{tf}")
         df = fetch_data(symbol, tf, use_dummy)
         df = calc_indicators(df)
-        dfs[tf] = df
-        summary_dirs[tf] = summary_direction(df, style)
-
-    for tf in tf_list:
-        st.subheader(f"⏱ 時間足：{tf}")
-        df = dfs[tf]
         score, signal_type, mode, logs = rci_based_signal(df, style)
 
-        # 上位足フィルタ（順張りのみ適用）
-        higher_idx = high_to_low.index(tf) + 1 if tf in high_to_low else None
-        blocked = False
-        if signal_type in ("買い", "売り") and mode == "順張り" and higher_idx is not None and higher_idx < len(high_to_low):
-            higher_tf = high_to_low[higher_idx]
-            higher_dir = summary_dirs.get(higher_tf)
-            if higher_dir and higher_dir != signal_type:
-                logs.append(f"⚠ 上位足（{higher_tf}）の方向が{higher_dir}のため順張りシグナルを保留")
-                # suppress strong signal
-                score = 0
-                signal_type = None
-                mode = None
-                blocked = True
-
-        if score == 7 and not blocked:
+        if score == 7:
             decision = "🟢 エントリー判定：買い"
-        elif score == -7 and not blocked:
+        elif score == -7:
             decision = "🟥 エントリー判定：売り"
         else:
             decision = "⚪ 判定保留"
@@ -274,10 +225,12 @@ if st.button("実行"):
         st.markdown(f"**{decision}**")
         for log in logs:
             st.markdown(log)
-        st.markdown(f"**シグナルスコア：{score} / ±7点（ラベル重視）**")
+        st.markdown(f"**シグナルスコア：{score} / ±7点**")
 
-        if score in (7, -7) and not blocked:
+        if score in (7, -7):
             plan = generate_trade_plan(df, score, signal_type, mode)
             st.subheader("🧮 トレードプラン（RCI主軸型）")
             for k, v in plan.items():
                 st.write(f"{k}: {v}")
+        else:
+            st.info("シグナル条件を満たしていないため、トレードプランは表示されません。")
