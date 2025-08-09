@@ -114,7 +114,7 @@ def evaluate(df: pd.DataFrame, setting: dict) -> dict:
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.title("📊 FXシグナル分析ツール（RCIロジック / TP・SL付き）")
+st.title("📊 FXシグナル分析ツール（RCIロジック / TP・SL付き）2")
 
 symbol = st.selectbox("通貨ペアを選択", ["USDJPY", "EURUSD", "GBPJPY", "AUDJPY"])
 style = st.radio("トレードスタイルを選択", ["スキャル", "デイトレ", "スイング"])
@@ -154,4 +154,5 @@ if st.button("🔍 シグナルチェック"):
         st.subheader("📌 根拠ログ")
         for log in result["logs"]:
             st.write(f"- {log}")
+
 
