@@ -7,7 +7,7 @@ import os
 # -----------------------------
 # APIキー設定（ベースコード準拠）
 # -----------------------------
-API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY")  # 環境変数から取得
+API_KEY = st.secrets["API_KEY"]
 BASE_URL = "https://www.alphavantage.co/query"
 
 # -----------------------------
@@ -154,3 +154,4 @@ if st.button("🔍 シグナルチェック"):
         st.subheader("📌 根拠ログ")
         for log in result["logs"]:
             st.write(f"- {log}")
+
