@@ -28,10 +28,11 @@ selected_tfs = st.multiselect("時間足（複数選択可）", all_tfs, default
 
 st.markdown("---")
 
-# ---------- 通知設定（LINE Notify） ----------
-st.subheader("🔔 通知設定（LINE Notify）")
-use_notify = st.checkbox("LINE通知を有効にする", value=False)
-line_token = st.text_input("LINE Notify トークン（有効化時のみ）", type="password") if use_notify else ""
+# ---------- 通知設定（Telegram） ----------
+st.subheader("🔔 通知設定（Telegram）")
+use_notify = st.checkbox("Telegram通知を有効にする", value=False)
+telegram_bot_token = st.text_input("Telegram Bot Token（有効化時のみ）", type="password") if use_notify else ""
+telegram_chat_id = st.text_input("Telegram Chat ID（有効化時のみ）", type="password") if use_notify else ""
 notify_threshold = st.slider("通知のスコア閾値（絶対値）: このスコア以上で通知", min_value=2, max_value=7, value=4, step=1)
 
 st.markdown("---")
@@ -299,16 +300,18 @@ def generate_trade_plan(df, signal_score, signal_type, mode, higher_trends):
         "上位足整合": alignment
     }
 
-# ---------- 通知送信関数 ----------
-def send_line_notify(token: str, message: str):
-    if not token:
+# ---------- 通知送信関数（Telegram） ----------
+def send_telegram_message(bot_token: str, chat_id: str, message: str) -> bool:
+    if not bot_token or not chat_id:
         return False
-    url = "https://notify-api.line.me/api/notify"
-    headers = {"Authorization": f"Bearer {token}"}
-    data = {"message": message}
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
     try:
-        res = requests.post(url, headers=headers, data=data, timeout=10)
-        return res.status_code == 200
+        res = requests.post(url, data=payload, timeout=10)
+        if res.status_code == 200:
+            j = res.json()
+            return j.get("ok", False)
+        return False
     except Exception:
         return False
 
@@ -378,8 +381,8 @@ if st.button("🔍 一覧スキャンと通知実行"):
                     "備考": row_note
                 })
 
-                # 通知判定（条件を満たし、かつ未通知）
-                if use_notify and line_token and signal_type in ("買い", "売り") and abs(score) >= notify_threshold:
+                # 通知判定（条件を満たし、かつ未通知）  -- Telegram へ送信
+                if use_notify and telegram_bot_token and telegram_chat_id and signal_type in ("買い", "売り") and abs(score) >= notify_threshold:
                     notify_key = f"{pair}_{tf}_{signal_type}_{score}"
                     if notify_key not in st.session_state["notified_keys"]:
                         # compose message
@@ -388,12 +391,12 @@ if st.button("🔍 一覧スキャンと通知実行"):
                         tp_s = f"{tp:.{decimals}f}" if tp is not None else "N/A"
                         sl_s = f"{sl:.{decimals}f}" if sl is not None else "N/A"
                         msg = f"{pair} {tf} {signal_type}シグナル（スコア {score}）\nエントリー: {entry_s}\nTP: {tp_s} / SL: {sl_s} (RR={rr})\n備考: {row_note}"
-                        ok = send_line_notify(line_token, msg)
+                        ok = send_telegram_message(telegram_bot_token, telegram_chat_id, msg)
                         if ok:
-                            st.success(f"LINE通知送信済: {pair} {tf} {signal_type}")
+                            st.success(f"Telegram通知送信済: {pair} {tf} {signal_type}")
                             st.session_state["notified_keys"].add(notify_key)
                         else:
-                            st.error(f"LINE通知送信失敗: {pair} {tf}")
+                            st.error(f"Telegram通知送信失敗: {pair} {tf}")
 
         progress.empty()
         df_res = pd.DataFrame(results)
