@@ -11,7 +11,7 @@ st.title("📈 RCI主軸FXトレード分析ツール（一覧）")
 
 # ---------- UI: 基本設定 ----------
 pairs_all = ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"]
-pairs = st.multiselect("監視する通貨ペア（複数選択可）", pairs_all, default="EUR/USD", "GBP/JPY")
+pairs = st.multiselect("監視する通貨ペア（複数選択可）", pairs_all, default=["GBP/JPY", "EUR/USD"])
 
 style = st.selectbox("トレードスタイルを選択", ["スキャルピング", "デイトレード", "スイング"], index=1)
 use_dummy = st.checkbox("📦 ダミーデータで実行（テストモード）", value=False)
@@ -222,4 +222,5 @@ if st.button("🔍 一覧スキャン実行"):
         df_res=pd.DataFrame(results)
         st.subheader("📋 シグナル一覧")
         st.dataframe(df_res, use_container_width=True)
+
 
