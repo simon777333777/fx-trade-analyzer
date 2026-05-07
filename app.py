@@ -7,7 +7,7 @@ from typing import List
 st.set_page_config(page_title="RCI主軸FXトレード分析（一覧）", layout="centered")
 API_KEY = st.secrets["API_KEY"]
 
-st.title("📈 RCI主軸FXトレード分析ツール（一覧）")
+st.title("📈 RCI主軸FXトレード分析ツール")
 
 # ---------- UI: 基本設定 ----------
 pairs_all = ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"]
