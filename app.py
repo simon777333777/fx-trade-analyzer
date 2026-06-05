@@ -233,13 +233,40 @@ def calc_indicators(df):
 def get_thresholds(style):
 
     if style == "スキャルピング":
-        return 80, 40
+
+        return {
+
+            "rci_long": 20,
+
+            "adx": 15,
+
+            "atr": 0.0015
+
+        }
 
     elif style == "デイトレード":
-        return 70, 30
+
+        return {
+
+            "rci_long": 15,
+
+            "adx": 18,
+
+            "atr": 0.0020
+
+        }
 
     else:
-        return 60, 20
+
+        return {
+
+            "rci_long": 10,
+
+            "adx": 20,
+
+            "atr": 0.0025
+
+        }
 
 # =========================================================
 # 上位足判定
@@ -275,16 +302,12 @@ def rci_based_signal(df, style, higher_trends):
         return 0, None, None, ["データ不足"], {}
 
     last = df.iloc[-1]
-
     prev = df.iloc[-2]
 
     logs = []
 
-    short_thr, long_thr = get_thresholds(style)
+    th = get_thresholds(style)
 
-    # -------------------------------
-    # 各指標
-    # -------------------------------
     rci9 = last["RCI_9"]
     rci26 = last["RCI_26"]
     rci52 = last["RCI_52"]
@@ -296,42 +319,22 @@ def rci_based_signal(df, style, higher_trends):
     signal = last["Signal"]
 
     close = last["close"]
-
     ema200 = last["EMA200"]
 
     atr = last["ATR"]
-
     adx = last["ADX"]
 
-    # -------------------------------
-    # ATRフィルター
-    # -------------------------------
-    atr_ratio = atr / close if close != 0 else 0
+    atr_ratio = atr / close if close else 0
 
-    volatility_ok = atr_ratio > 0.0025
+    volatility_ok = atr_ratio > th["atr"]
+    trend_ok = adx > th["adx"]
 
-    # -------------------------------
-    # ADXフィルター
-    # -------------------------------
-    trend_ok = adx > 20
-
-    # -------------------------------
-    # EMA方向
-    # -------------------------------
     ema_bull = close > ema200
-
     ema_bear = close < ema200
 
-    # -------------------------------
-    # MACD
-    # -------------------------------
     macd_bull = macd > signal
-
     macd_bear = macd < signal
 
-    # -------------------------------
-    # RCIクロス
-    # -------------------------------
     bullish_cross = (
         rci9_prev < rci26_prev
         and rci9 > rci26
@@ -342,105 +345,111 @@ def rci_based_signal(df, style, higher_trends):
         and rci9 < rci26
     )
 
-    # -------------------------------
-    # 上位足整合
-    # -------------------------------
-    buy_alignment = all(
-        t == "上昇"
-        for t in higher_trends
-    ) if higher_trends else False
+    buy_points = 0
+    sell_points = 0
 
-    sell_alignment = all(
-        t == "下降"
-        for t in higher_trends
-    ) if higher_trends else False
+    reasons = []
 
-    # =====================================================
-    # 買い条件（押し目）
-    # =====================================================
-    cond_buy = (
-        rci52 > long_thr
-        and rci26 > 0
-        and rci9_prev < -80
-        and bullish_cross
-        and macd_bull
-        and ema_bull
-        and volatility_ok
-        and trend_ok
-    )
+    # ----------------------
+    # BUY採点
+    # ----------------------
+    if rci52 > th["rci_long"]:
+        buy_points += 1
+        reasons.append("RCI52上向")
 
-    # =====================================================
-    # 売り条件
-    # =====================================================
-    cond_sell = (
-        rci52 < -long_thr
-        and rci26 < 0
-        and rci9_prev > 80
-        and bearish_cross
-        and macd_bear
-        and ema_bear
-        and volatility_ok
-        and trend_ok
-    )
+    if rci26 > 0:
+        buy_points += 1
 
-    # =====================================================
-    # スコアリング
-    # =====================================================
-    score = 0
+    if bullish_cross:
+        buy_points += 1
+        reasons.append("RCIクロス")
+
+    if macd_bull:
+        buy_points += 1
+        reasons.append("MACD買")
+
+    if ema_bull:
+        buy_points += 1
+        reasons.append("EMA上")
+
+    if volatility_ok:
+        buy_points += 1
+
+    if trend_ok:
+        buy_points += 1
+        reasons.append("ADX良")
+
+    # ----------------------
+    # SELL採点
+    # ----------------------
+    if rci52 < -th["rci_long"]:
+        sell_points += 1
+
+    if rci26 < 0:
+        sell_points += 1
+
+    if bearish_cross:
+        sell_points += 1
+
+    if macd_bear:
+        sell_points += 1
+
+    if ema_bear:
+        sell_points += 1
+
+    if volatility_ok:
+        sell_points += 1
+
+    if trend_ok:
+        sell_points += 1
 
     signal_type = None
-
     mode = None
+    score = 0
 
-    if cond_buy:
+    # ==================================================
+    # BUY
+    # ==================================================
+    if buy_points >= 7:
 
         signal_type = "買い"
-
         mode = "押し目買い"
+        score = 7
 
+    elif buy_points >= 5:
+
+        signal_type = "買い"
+        mode = "順張り買い"
         score = 4
 
-        if buy_alignment:
-            score += 2
+    elif buy_points >= 4:
 
-        if adx > 30:
-            score += 1
+        signal_type = "買い"
+        mode = "逆張り買い"
+        score = 2
 
-        logs.append(
-            f"買い成立 "
-            f"RCI9={rci9:.1f} "
-            f"ADX={adx:.1f} "
-            f"ATR比={atr_ratio:.4f}"
-        )
-
-    elif cond_sell:
+    # ==================================================
+    # SELL
+    # ==================================================
+    elif sell_points >= 7:
 
         signal_type = "売り"
-
         mode = "戻り売り"
+        score = -7
 
+    elif sell_points >= 5:
+
+        signal_type = "売り"
+        mode = "順張り売り"
         score = -4
 
-        if sell_alignment:
-            score -= 2
+    elif sell_points >= 4:
 
-        if adx > 30:
-            score -= 1
+        signal_type = "売り"
+        mode = "逆張り売り"
+        score = -2
 
-        logs.append(
-            f"売り成立 "
-            f"RCI9={rci9:.1f} "
-            f"ADX={adx:.1f} "
-            f"ATR比={atr_ratio:.4f}"
-        )
-
-    else:
-
-        logs.append(
-            f"条件未成立 "
-            f"ADX={adx:.1f} "
-            f"ATR比={atr_ratio:.4f}"
-        )
+    logs.extend(reasons)
 
     return score, signal_type, mode, logs, {}
 
@@ -462,70 +471,85 @@ def generate_trade_plan(
 
     atr = df["ATR"].iloc[-1]
 
-    recent_high = df["high"].rolling(20).max().iloc[-1]
+    recent_high = (
+        df["high"]
+        .rolling(20)
+        .max()
+        .iloc[-1]
+    )
 
-    recent_low = df["low"].rolling(20).min().iloc[-1]
+    recent_low = (
+        df["low"]
+        .rolling(20)
+        .min()
+        .iloc[-1]
+    )
 
-    # =====================================================
-    # BUY
-    # =====================================================
     if signal_type == "買い":
 
-        sl = recent_low - (atr * 0.3)
+        sl = recent_low - atr * 0.3
 
         risk = entry - sl
 
-        tp = entry + (risk * 1.5)
+        tp = entry + risk * 1.5
 
-    # =====================================================
-    # SELL
-    # =====================================================
     else:
 
-        sl = recent_high + (atr * 0.3)
+        sl = recent_high + atr * 0.3
 
         risk = sl - entry
 
-        tp = entry - (risk * 1.5)
+        tp = entry - risk * 1.5
 
-    # =====================================================
-    # RR
-    # =====================================================
     rr = round(
         abs((tp - entry) / (entry - sl)),
         2
     ) if (entry - sl) != 0 else 0
 
-    # =====================================================
-    # コメント
-    # =====================================================
-    abs_score = abs(signal_score)
+    if rr >= 2:
 
-    if abs_score >= 6:
-        comment = "強"
+        rr_rank = "良好"
 
-    elif abs_score >= 4:
-        comment = "中"
+    elif rr >= 1.2:
+
+        rr_rank = "普通"
 
     else:
-        comment = "弱"
 
-    alignment_str = "整合" if (
-        signal_type == "買い"
-        and all(t == "上昇" for t in higher_trends)
-    ) or (
-        signal_type == "売り"
-        and all(t == "下降" for t in higher_trends)
-    ) else "不整合"
+        rr_rank = "注意"
+
+    if abs(signal_score) >= 6 and rr >= 1.2:
+
+        recommendation = "推奨"
+
+    elif abs(signal_score) >= 4:
+
+        recommendation = "注意"
+
+    else:
+
+        recommendation = "見送り"
+
+    tp_pips = round(
+        abs(tp - entry) * 100,
+        1
+    )
+
+    sl_pips = round(
+        abs(entry - sl) * 100,
+        1
+    )
 
     return {
         "エントリー価格": round(entry, 4),
         "利確（TP）": round(tp, 4),
         "損切（SL）": round(sl, 4),
         "RR": rr,
-        "コメント": comment,
-        "シグナル種類": f"{signal_type} ({mode})",
-        "上位足整合": alignment_str
+        "RR評価": rr_rank,
+        "推奨度": recommendation,
+        "TP(pips)": tp_pips,
+        "SL(pips)": sl_pips,
+        "シグナル種類": f"{signal_type} ({mode})"
     }
 
 # =========================================================
