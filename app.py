@@ -2,718 +2,143 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from typing import List
 
-st.set_page_config(page_title="RCI主軸FXトレード分析（改善版）", layout="centered")
-
+st.set_page_config(page_title="RCI FX Scanner", layout="wide")
 API_KEY = st.secrets["API_KEY"]
 
-st.title("📈 RCI主軸FXトレード分析ツール（改善版）")
+pairs = ["USD/JPY","EUR/USD","GBP/JPY","AUD/USD","EUR/JPY","GBP/USD"]
+tfs = ["15min","1h","4h","1day"]
 
-# =========================================================
-# UI
-# =========================================================
-pairs_all = ["USD/JPY", "EUR/USD", "GBP/JPY", "AUD/USD"]
+st.title("RCI FX Scanner")
+selected_pairs = st.multiselect("通貨ペア", pairs, default=["USD/JPY","GBP/JPY","EUR/USD"])
+selected_tfs = st.multiselect("時間足", tfs, default=["1h","4h"])
 
-pairs = st.multiselect(
-    "監視する通貨ペア（複数選択可）",
-    pairs_all,
-    default=["GBP/JPY", "EUR/USD"]
-)
-
-style = st.selectbox(
-    "トレードスタイルを選択",
-    ["スキャルピング", "デイトレード", "スイング"],
-    index=1
-)
-
-use_dummy = st.checkbox(
-    "📦 ダミーデータで実行（テストモード）",
-    value=False
-)
-
-tf_map = {
-    "スキャルピング": ["5min", "15min", "1h"],
-    "デイトレード": ["15min", "1h", "4h"],
-    "スイング": ["1h", "4h", "1day"]
-}
-
-all_tfs = sorted({tf for v in tf_map.values() for tf in v})
-
-selected_tfs = st.multiselect(
-    "時間足（複数選択可）",
-    all_tfs,
-    default=tf_map[style]
-)
-
-st.markdown("---")
-
-# =========================================================
-# ダミーデータ
-# =========================================================
-def get_dummy_data():
-
-    idx = pd.date_range(
-        end=pd.Timestamp.now(),
-        periods=700,
-        freq="H"
-    )
-
-    trend = np.linspace(0, 10, len(idx))
-
-    noise = np.random.randn(len(idx)) * 0.5
-
-    price = 150 + trend + np.cumsum(noise)
-
-    df = pd.DataFrame({
-        "datetime": idx,
-        "open": price + np.random.randn(len(idx))*0.2,
-        "high": price + np.abs(np.random.randn(len(idx))*0.4),
-        "low": price - np.abs(np.random.randn(len(idx))*0.4),
-        "close": price,
-        "volume": 1000
-    })
-
-    df.set_index("datetime", inplace=True)
-
-    return df
-
-# =========================================================
-# データ取得
-# =========================================================
 @st.cache_data(ttl=300)
-def fetch_data(symbol, interval, use_dummy_flag):
-
-    if use_dummy_flag:
-        return get_dummy_data()
-
-    url = (
-        f"https://api.twelvedata.com/time_series"
-        f"?symbol={symbol}"
-        f"&interval={interval}"
-        f"&outputsize=700"
-        f"&apikey={API_KEY}"
-    )
-
+def fetch_data(symbol, interval):
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize=300&apikey={API_KEY}"
     try:
-        r = requests.get(url, timeout=10)
-
-        data = r.json()
-
-        if "values" not in data:
+        r = requests.get(url, timeout=15).json()
+        if "values" not in r:
             return pd.DataFrame()
-
-        df = pd.DataFrame(data["values"])
-
+        df = pd.DataFrame(r["values"])
         df["datetime"] = pd.to_datetime(df["datetime"])
-
-        df.set_index("datetime", inplace=True)
-
-        df = df.sort_index()
-
-        df = df.apply(pd.to_numeric, errors="coerce")
-
-        return df
-
-    except Exception:
+        df = df.set_index("datetime").sort_index()
+        return df.apply(pd.to_numeric, errors="coerce")
+    except:
         return pd.DataFrame()
 
-# =========================================================
-# RCI
-# =========================================================
-def calc_rci(series):
-
-    n = len(series)
-
-    if series.isna().any() or n < 2:
+def rci(x):
+    n = len(x)
+    if n < 2:
         return np.nan
+    p = pd.Series(x).rank()
+    t = np.arange(1, n + 1)
+    d = p - t
+    return (1 - 6 * (d ** 2).sum() / (n * (n**2 - 1))) * 100
 
-    price_rank = series.rank(method="average")
-
-    time_rank = pd.Series(
-        np.arange(1, n+1),
-        index=series.index
-    )
-
-    d = price_rank - time_rank
-
-    denom = n * (n**2 - 1)
-
-    if denom == 0:
-        return np.nan
-
-    rho = 1 - (6 * (d**2).sum()) / denom
-
-    return rho * 100
-
-# =========================================================
-# 指標計算
-# =========================================================
-def calc_indicators(df):
-
-    # -------------------------------
-    # RCI
-    # -------------------------------
-    for period in [9, 26, 52]:
-
-        df[f"RCI_{period}"] = (
-            df["close"]
-            .rolling(period)
-            .apply(
-                lambda x: calc_rci(pd.Series(x)),
-                raw=False
-            )
-        )
-
-    # -------------------------------
-    # MACD
-    # -------------------------------
-    ema12 = df["close"].ewm(span=12).mean()
-
-    ema26 = df["close"].ewm(span=26).mean()
-
-    df["MACD"] = ema12 - ema26
-
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
-
-    # -------------------------------
-    # EMA200
-    # -------------------------------
-    df["EMA200"] = df["close"].ewm(span=200).mean()
-
-    # -------------------------------
-    # ATR
-    # -------------------------------
-    high_low = df["high"] - df["low"]
-
-    high_close = np.abs(df["high"] - df["close"].shift())
-
-    low_close = np.abs(df["low"] - df["close"].shift())
-
-    tr = pd.concat(
-        [high_low, high_close, low_close],
-        axis=1
-    ).max(axis=1)
-
+def indicators(df):
+    for p in (9,26,52):
+        df[f"RCI{p}"] = df["close"].rolling(p).apply(rci, raw=False)
+    df["EMA200"] = df["close"].ewm(span=200, adjust=False).mean()
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift()).abs(),
+        (df["low"] - df["close"].shift()).abs()
+    ], axis=1).max(axis=1)
     df["ATR"] = tr.rolling(14).mean()
-
-    # -------------------------------
-    # ADX
-    # -------------------------------
-    plus_dm = df["high"].diff()
-
-    minus_dm = -df["low"].diff()
-
-    plus_dm[plus_dm < 0] = 0
-
-    minus_dm[minus_dm < 0] = 0
-
-    tr_smooth = tr.rolling(14).sum()
-
-    plus_di = 100 * (
-        plus_dm.rolling(14).sum() / tr_smooth
-    )
-
-    minus_di = 100 * (
-        minus_dm.rolling(14).sum() / tr_smooth
-    )
-
-    dx = (
-        abs(plus_di - minus_di)
-        / (plus_di + minus_di)
-    ) * 100
-
-    df["ADX"] = dx.rolling(14).mean()
-
     return df
 
-# =========================================================
-# スタイル別閾値
-# =========================================================
-def get_thresholds(style):
-
-    if style == "スキャルピング":
-
-        return {
-
-            "rci_long": 20,
-
-            "adx": 15,
-
-            "atr": 0.0015
-
-        }
-
-    elif style == "デイトレード":
-
-        return {
-
-            "rci_long": 15,
-
-            "adx": 18,
-
-            "atr": 0.0020
-
-        }
-
-    else:
-
-        return {
-
-            "rci_long": 10,
-
-            "adx": 20,
-
-            "atr": 0.0025
-
-        }
-
-# =========================================================
-# 上位足判定
-# =========================================================
-def determine_trend(df, style):
-
-    if df.empty:
-        return "ニュートラル"
-
-    last = df.iloc[-1]
-
-    rci52 = last.get("RCI_52", 0)
-
-    ema200 = last.get("EMA200", 0)
-
-    close = last.get("close", 0)
-
-    if rci52 > 40 and close > ema200:
-        return "上昇"
-
-    elif rci52 < -40 and close < ema200:
-        return "下降"
-
-    else:
-        return "ニュートラル"
-
-# =========================================================
-# シグナル判定
-# =========================================================
-def rci_based_signal(df, style, higher_trends):
-
-    if df.empty or len(df) < 60:
-        return 0, None, None, ["データ不足"], {}
-
+def analyze(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    logs = []
-
-    th = get_thresholds(style)
-
-    rci9 = last["RCI_9"]
-    rci26 = last["RCI_26"]
-    rci52 = last["RCI_52"]
-
-    rci9_prev = prev["RCI_9"]
-    rci26_prev = prev["RCI_26"]
-
-    macd = last["MACD"]
-    signal = last["Signal"]
-
-    close = last["close"]
-    ema200 = last["EMA200"]
-
-    atr = last["ATR"]
-    adx = last["ADX"]
-
-    atr_ratio = atr / close if close else 0
-
-    volatility_ok = atr_ratio > th["atr"]
-    trend_ok = adx > th["adx"]
-
-    ema_bull = close > ema200
-    ema_bear = close < ema200
-
-    macd_bull = macd > signal
-    macd_bear = macd < signal
-
-    bullish_cross = (
-        rci9_prev < rci26_prev
-        and rci9 > rci26
-    )
-
-    bearish_cross = (
-        rci9_prev > rci26_prev
-        and rci9 < rci26
-    )
-
-    buy_points = 0
-    sell_points = 0
-
+    score = 0
     reasons = []
 
-    # ----------------------
-    # BUY採点
-    # ----------------------
-    if rci52 > th["rci_long"]:
-        buy_points += 1
-        reasons.append("RCI52上向")
+    if last.RCI52 > 20:
+        score += 2
+        reasons.append("RCI52↑")
+    elif last.RCI52 < -20:
+        score -= 2
+        reasons.append("RCI52↓")
 
-    if rci26 > 0:
-        buy_points += 1
+    if last.RCI26 > 20:
+        score += 2
+        reasons.append("RCI26↑")
+    elif last.RCI26 < -20:
+        score -= 2
+        reasons.append("RCI26↓")
 
-    if bullish_cross:
-        buy_points += 1
-        reasons.append("RCIクロス")
+    if last.RCI9 > last.RCI26:
+        score += 2
+        reasons.append("RCI9優勢")
+    else:
+        score -= 2
 
-    if macd_bull:
-        buy_points += 1
-        reasons.append("MACD買")
+    if last.RCI9 > prev.RCI9:
+        score += 1
+        reasons.append("RCI9上昇")
+    else:
+        score -= 1
 
-    if ema_bull:
-        buy_points += 1
+    if last.close > last.EMA200:
+        score += 2
         reasons.append("EMA上")
-
-    if volatility_ok:
-        buy_points += 1
-
-    if trend_ok:
-        buy_points += 1
-        reasons.append("ADX良")
-
-    # ----------------------
-    # SELL採点
-    # ----------------------
-    if rci52 < -th["rci_long"]:
-        sell_points += 1
-
-    if rci26 < 0:
-        sell_points += 1
-
-    if bearish_cross:
-        sell_points += 1
-
-    if macd_bear:
-        sell_points += 1
-
-    if ema_bear:
-        sell_points += 1
-
-    if volatility_ok:
-        sell_points += 1
-
-    if trend_ok:
-        sell_points += 1
-
-    signal_type = None
-    mode = None
-    score = 0
-
-    # ==================================================
-    # BUY
-    # ==================================================
-    if buy_points >= 7:
-
-        signal_type = "買い"
-        mode = "押し目買い"
-        score = 7
-
-    elif buy_points >= 5:
-
-        signal_type = "買い"
-        mode = "順張り買い"
-        score = 4
-
-    elif buy_points >= 4:
-
-        signal_type = "買い"
-        mode = "逆張り買い"
-        score = 2
-
-    # ==================================================
-    # SELL
-    # ==================================================
-    elif sell_points >= 7:
-
-        signal_type = "売り"
-        mode = "戻り売り"
-        score = -7
-
-    elif sell_points >= 5:
-
-        signal_type = "売り"
-        mode = "順張り売り"
-        score = -4
-
-    elif sell_points >= 4:
-
-        signal_type = "売り"
-        mode = "逆張り売り"
-        score = -2
-
-    logs.extend(reasons)
-
-    return score, signal_type, mode, logs, {}
-
-# =========================================================
-# トレードプラン
-# =========================================================
-def generate_trade_plan(
-    df,
-    signal_score,
-    signal_type,
-    mode,
-    higher_trends
-):
-
-    if signal_type is None:
-        return {}
-
-    entry = df["close"].iloc[-1]
-
-    atr = df["ATR"].iloc[-1]
-
-    recent_high = (
-        df["high"]
-        .rolling(20)
-        .max()
-        .iloc[-1]
-    )
-
-    recent_low = (
-        df["low"]
-        .rolling(20)
-        .min()
-        .iloc[-1]
-    )
-
-    if signal_type == "買い":
-
-        sl = recent_low - atr * 0.3
-
-        risk = entry - sl
-
-        tp = entry + risk * 1.5
-
     else:
+        score -= 2
 
-        sl = recent_high + atr * 0.3
-
-        risk = sl - entry
-
-        tp = entry - risk * 1.5
-
-    rr = round(
-        abs((tp - entry) / (entry - sl)),
-        2
-    ) if (entry - sl) != 0 else 0
-
-    if rr >= 2:
-
-        rr_rank = "良好"
-
-    elif rr >= 1.2:
-
-        rr_rank = "普通"
-
+    if score >= 7:
+        signal = "強買い"
+        sl = round(last.ATR * 1.0, 4)
+        tp = round(last.ATR * 2.0, 4)
+    elif score >= 4:
+        signal = "買い"
+        sl = round(last.ATR * 1.0, 4)
+        tp = round(last.ATR * 1.5, 4)
+    elif score <= -7:
+        signal = "強売り"
+        sl = round(last.ATR * 1.0, 4)
+        tp = round(last.ATR * 2.0, 4)
+    elif score <= -4:
+        signal = "売り"
+        sl = round(last.ATR * 1.0, 4)
+        tp = round(last.ATR * 1.5, 4)
     else:
+        signal = "監視"
+        sl = None
+        tp = None
 
-        rr_rank = "注意"
+    return signal, score, sl, tp, ",".join(reasons)
 
-    if abs(signal_score) >= 6 and rr >= 1.2:
+if st.button("スキャン"):
+    rows = []
 
-        recommendation = "推奨"
+    for pair in selected_pairs:
+        for tf in selected_tfs:
+            df = fetch_data(pair, tf)
 
-    elif abs(signal_score) >= 4:
+            if len(df) < 220:
+                continue
 
-        recommendation = "注意"
+            df = indicators(df)
 
+            signal, score, sl, tp, reason = analyze(df)
+
+            rows.append({
+                "ペア": pair,
+                "時間足": tf,
+                "判定": signal,
+                "点数": score,
+                "現在価格": round(df["close"].iloc[-1], 4),
+                "損切幅": sl,
+                "利確幅": tp,
+                "根拠": reason
+            })
+
+    if rows:
+        res = pd.DataFrame(rows)
+        res["sort"] = res["点数"].abs()
+        res = res.sort_values("sort", ascending=False).drop(columns="sort")
+        st.dataframe(res, use_container_width=True)
     else:
-
-        recommendation = "見送り"
-
-    tp_pips = round(
-        abs(tp - entry) * 100,
-        1
-    )
-
-    sl_pips = round(
-        abs(entry - sl) * 100,
-        1
-    )
-
-    return {
-        "エントリー価格": round(entry, 4),
-        "利確（TP）": round(tp, 4),
-        "損切（SL）": round(sl, 4),
-        "RR": rr,
-        "RR評価": rr_rank,
-        "推奨度": recommendation,
-        "TP(pips)": tp_pips,
-        "SL(pips)": sl_pips,
-        "シグナル種類": f"{signal_type} ({mode})"
-    }
-
-# =========================================================
-# 実行
-# =========================================================
-if st.button("🔍 一覧スキャン実行"):
-
-    if not pairs:
-
-        st.warning(
-            "監視する通貨ペアを選択してください。"
-        )
-
-    elif not selected_tfs:
-
-        st.warning(
-            "時間足を選択してください。"
-        )
-
-    else:
-
-        results = []
-
-        progress = st.progress(0)
-
-        total = len(pairs) * len(selected_tfs)
-
-        i = 0
-
-        for pair in pairs:
-
-            for tf in selected_tfs:
-
-                i += 1
-
-                progress.progress(int(i / total * 100))
-
-                df = fetch_data(
-                    pair,
-                    tf,
-                    use_dummy
-                )
-
-                if df.empty:
-
-                    results.append({
-                        "ペア": pair,
-                        "時間足": tf,
-                        "シグナル": "取得失敗",
-                        "スコア": None
-                    })
-
-                    continue
-
-                df = calc_indicators(df)
-
-                # ----------------------------------------
-                # 上位足
-                # ----------------------------------------
-                higher_trends = []
-
-                for htf in selected_tfs:
-
-                    if htf == tf:
-                        continue
-
-                    hdf = fetch_data(
-                        pair,
-                        htf,
-                        use_dummy
-                    )
-
-                    if hdf.empty:
-                        continue
-
-                    hdf = calc_indicators(hdf)
-
-                    trend = determine_trend(
-                        hdf,
-                        style
-                    )
-
-                    higher_trends.append(trend)
-
-                # ----------------------------------------
-                # シグナル
-                # ----------------------------------------
-                score, signal_type, mode, logs, _ = (
-                    rci_based_signal(
-                        df,
-                        style,
-                        higher_trends
-                    )
-                )
-
-                # ----------------------------------------
-                # トレードプラン
-                # ----------------------------------------
-                if signal_type:
-
-                    plan = generate_trade_plan(
-                        df,
-                        score,
-                        signal_type,
-                        mode,
-                        higher_trends
-                    )
-
-                else:
-                    plan = {}
-
-                # ----------------------------------------
-                # RRフィルター
-                # ----------------------------------------
-                rr = plan.get("RR", 0)
-
-                if signal_type and rr < 1.2:
-
-                    logs.append(
-                        f"RR不足({rr})"
-                    )
-
-                # ----------------------------------------
-                # 結果
-                # ----------------------------------------
-                results.append({
-                    "ペア": pair,
-                    "時間足": tf,
-                    "シグナル": signal_type if signal_type else "なし",
-                    "スコア": round(score, 1) if score else None,
-                    "エントリー": plan.get("エントリー価格"),
-                    "TP": plan.get("利確（TP）"),
-                    "SL": plan.get("損切（SL）"),
-                    "RR": plan.get("RR"),
-                    "備考": "; ".join(logs[:3])
-                })
-
-        progress.empty()
-
-        df_res = pd.DataFrame(results)
-
-        # ----------------------------------------
-        # スコア順
-        # ----------------------------------------
-        if not df_res.empty and "スコア" in df_res.columns:
-
-            df_res["abs_score"] = (
-                df_res["スコア"]
-                .fillna(0)
-                .abs()
-            )
-
-            df_res = df_res.sort_values(
-                "abs_score",
-                ascending=False
-            )
-
-            df_res = df_res.drop(
-                columns=["abs_score"]
-            )
-
-        st.subheader("📋 シグナル一覧")
-
-        st.dataframe(
-            df_res,
-            use_container_width=True
-        )
+        st.warning("データ取得失敗")
